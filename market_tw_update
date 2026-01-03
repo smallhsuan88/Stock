@@ -1,0 +1,223 @@
+/** =========================================================
+ * market_tw_update.gs  (Stable + Date-safe)
+ * Daily update: fetch today (or given date), append Raw, compute Signals
+ *
+ * Fixes:
+ * 1) Normalize raw date values (Date object / string) -> yyyy-MM-dd
+ * 2) Sort raw rows by date asc so "latest" always correct
+ * 3) Prevent duplicate append when existing dates are Date objects
+ * ========================================================= */
+
+var MarketTWUpdate = (function () {
+  const RAW_SHEET = 'Raw_Market_TW';
+  const SIG_SHEET = 'Signals_Market_TW';
+  const MARKET_CODE = 'TW';
+  const MA60_N = 60;
+
+  function runMarketTW() {
+    const ss = SpreadsheetApp.getActive();
+    const raw = ss.getSheetByName(RAW_SHEET);
+    const sig = ss.getSheetByName(SIG_SHEET);
+    if (!raw || !sig) throw new Error('Raw_Market_TW or Signals_Market_TW not found');
+
+    ensureRawHeader_(raw);
+
+    // 今天（台北時區）
+    const todayYmd = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyyMMdd');
+    const parsed = fetchOneDay_(todayYmd);
+
+    // 若今天非交易日/尚未出完資料，parsed 會是 null：直接略過，不要把 Signals 清空
+    if (parsed) {
+      appendIfNotExists_(raw, parsed);
+    }
+
+    const all = readRaw_(raw); // ✅ normalized + sorted
+    if (all.length < MA60_N + 1) {
+      Logger.log(`Not enough trading days in Raw: ${all.length}`);
+      return;
+    }
+
+    const latest = calcSignal_(all);
+
+    // 寫 Signals（只留一筆）
+    sig.clearContents();
+    sig.appendRow(['market','date','taiex_close','market_value','market_volume','ma60','ma60_state','ma60_streak_days']);
+    sig.appendRow([
+      MARKET_CODE,
+      latest.date,
+      latest.close,
+      latest.market_value,
+      latest.market_volume,
+      latest.ma60,
+      latest.ma60_state,
+      latest.ma60_streak_days
+    ]);
+  }
+
+  function fetchOneDay_(yyyymmdd) {
+    const url = `https://www.twse.com.tw/rwd/zh/afterTrading/MT_INDX?response=json&date=${yyyymmdd}&type=ALL`;
+    const resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (resp.getResponseCode() !== 200) return null;
+
+    const txt = resp.getContentText();
+    if (!txt) return null;
+
+    let json;
+    try { json = JSON.parse(txt); } catch (e) { return null; }
+
+    return parseTaiExFromTables_(json, yyyymmdd);
+  }
+
+  function parseTaiExFromTables_(json, yyyymmdd) {
+    const tables = Array.isArray(json && json.tables) ? json.tables : null;
+    if (!tables) return null;
+
+    for (const t of tables) {
+      const data = Array.isArray(t.data) ? t.data : [];
+      for (const row of data) {
+        const name = String(row[0] ?? '');
+        if (name.includes('發行量加權股價指數')) {
+          const close = parseNum_(row[1]);
+          if (!isFinite(close) || close <= 0) return null;
+
+          return {
+            market: MARKET_CODE,
+            date: toIsoDate_(yyyymmdd),   // yyyy-MM-dd
+            close,
+            market_value: '',
+            market_volume: ''
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** ✅ 避免重複：existing date 也 normalize 成 yyyy-MM-dd 再比對 */
+  function appendIfNotExists_(sh, obj) {
+    const lastRow = sh.getLastRow();
+    const exist = (lastRow >= 2)
+      ? sh.getRange(2, 2, lastRow - 1, 1).getValues().flat().map(normalizeDate_)
+      : [];
+    const set = new Set(exist);
+
+    const d = normalizeDate_(obj.date);
+    if (!d) return;
+    if (set.has(d)) return;
+
+    sh.getRange(lastRow + 1, 1, 1, 5).setValues([[obj.market, d, obj.close, obj.market_value, obj.market_volume]]);
+  }
+
+  /** ✅ 讀 Raw：date 正規化 + 排序（確保最後一筆是最新交易日） */
+  function readRaw_(sh) {
+    if (sh.getLastRow() < 2) return [];
+    const v = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
+
+    const rows = v.map(r => ({
+      market: r[0],
+      date: normalizeDate_(r[1]),
+      close: Number(r[2]),
+      market_value: r[3],
+      market_volume: r[4]
+    })).filter(x => x.date && isFinite(x.close) && x.close > 0);
+
+    // asc by date
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+
+    // 去重：同一天只留最後一筆（防止歷史上被重複寫入）
+    const dedup = [];
+    const seen = new Set();
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const d = rows[i].date;
+      if (seen.has(d)) continue;
+      seen.add(d);
+      dedup.push(rows[i]);
+    }
+    dedup.reverse();
+
+    return dedup;
+  }
+
+  function calcSignal_(rows) {
+    // rows 已排序 asc
+    const closes = rows.map(r => r.close);
+    const last = rows[rows.length - 1];
+
+    const ma60 = sma_(closes, MA60_N);
+    if (!isFinite(ma60)) {
+      return { ...last, ma60: NaN, ma60_state: '', ma60_streak_days: 0 };
+    }
+
+    const state = last.close >= ma60 ? 'ABOVE' : 'BELOW';
+
+    // streak days: 從最後往前數，連續同一狀態的天數
+    let streak = 0;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const c = rows[i].close;
+      const m = sma_(closes.slice(0, i + 1), MA60_N);
+      if (!isFinite(m)) break;
+
+      const isAbove = c >= m;
+      if ((state === 'ABOVE' && isAbove) || (state === 'BELOW' && !isAbove)) streak++;
+      else break;
+    }
+
+    return { ...last, ma60, ma60_state: state, ma60_streak_days: streak };
+  }
+
+  function sma_(arr, win) {
+    if (!arr || arr.length < win) return NaN;
+    let s = 0;
+    for (let i = arr.length - win; i < arr.length; i++) s += Number(arr[i]) || 0;
+    return s / win;
+  }
+
+  function ensureRawHeader_(sh) {
+    if (sh.getLastRow() === 0) sh.appendRow(['market','date','close','market_value','market_volume']);
+  }
+
+  function toIsoDate_(yyyymmdd) {
+    return `${yyyymmdd.slice(0,4)}-${yyyymmdd.slice(4,6)}-${yyyymmdd.slice(6,8)}`;
+  }
+
+  function parseNum_(s) {
+    const n = Number(String(s ?? '').replace(/,/g, '').trim());
+    return isFinite(n) ? n : NaN;
+  }
+
+  /** ✅ Date 正規化：Date object / yyyy-mm-dd / yyyy/mm/dd / 其他可 parse 字串 -> yyyy-MM-dd */
+  function normalizeDate_(val) {
+    if (!val) return '';
+
+    // Date object
+    if (Object.prototype.toString.call(val) === '[object Date]' && !isNaN(val)) {
+      return Utilities.formatDate(val, 'Asia/Taipei', 'yyyy-MM-dd');
+    }
+
+    const s = String(val).trim();
+    if (!s) return '';
+
+    // yyyy-mm-dd
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+    // yyyy/mm/dd
+    if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replace(/\//g, '-');
+
+    // Try parse (e.g., "Tue Sep 16 2025 00:00:00 GMT+0800 ...")
+    const d = new Date(s);
+    if (!isNaN(d)) return Utilities.formatDate(d, 'Asia/Taipei', 'yyyy-MM-dd');
+
+    return '';
+  }
+
+  return { runMarketTW };
+})();
+
+
+// ✅ Apps Script 可執行入口（出現在下拉選單）
+function runMarketTW() {
+  MarketTWUpdate.runMarketTW();
+}
