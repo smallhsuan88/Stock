@@ -16,9 +16,37 @@
     .ok { font-weight: 700; }
     .warn { font-weight: 700; }
     .bad { font-weight: 800; }
+    .market-gate { border: 1px solid #e0e0e0; background: #fafafa; padding: 12px; border-radius: 10px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .market-gate__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .market-gate__title { font-weight: 700; font-size: 15px; }
+    .market-gate__index { font-weight: 700; font-size: 16px; }
+    .market-gate__content { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 6px 12px; align-items: center; }
+    .market-gate__state { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-weight: 700; }
+    .market-gate__streak { font-weight: 600; }
+    .market-gate__notice { font-size: 12px; color: #b26a00; padding: 2px 6px; background: #fff7e6; border-radius: 6px; }
+    .market-gate.is-above { border-color: #2e7d32; background: #f1fbf4; }
+    .market-gate.is-above .market-gate__state { background: #e6f4ea; color: #1b5e20; }
+    .market-gate.is-above .market-gate__streak { color: #1b5e20; }
+    .market-gate.is-below { border-color: #c62828; background: #fff5f5; }
+    .market-gate.is-below .market-gate__state { background: #fdecea; color: #b71c1c; }
+    .market-gate.is-below .market-gate__streak { color: #b71c1c; }
   </style>
 </head>
 <body>
+  <section class="market-gate" id="market-gate">
+    <div class="market-gate__header">
+      <div class="market-gate__title">Market Gate (TW TAIEX)</div>
+      <div class="market-gate__state">載入中…</div>
+    </div>
+    <div class="market-gate__content">
+      <div class="market-gate__index">台灣加權指數</div>
+      <div>日期：—</div>
+      <div>收盤：—</div>
+      <div>成交量/金額：—</div>
+      <div>MA60：—</div>
+      <div class="market-gate__streak">—</div>
+    </div>
+  </section>
   <div class="meta" id="meta"></div>
   <div class="controls">
     <label><input type="checkbox" id="toggle-technical" /> 顯示技術數據</label>
@@ -61,6 +89,7 @@
 <script>
 /** ====== CONFIG ====== */
 const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=1518299280&single=true&output=csv";  // 例如 .../pub?gid=xxx&single=true&output=csv
+const MARKET_CSV_URL = "Signals_Market_TW.csv";
 
 // 門檻可調
 const TH_ADX_TREND    = 25;
@@ -77,6 +106,7 @@ let sortKey = null;
 let sortAsc = false;
 let latestDate = null;
 let showTechnicalData = false;
+let marketInfo = null;
 const DECISION_HEADERS = [
   "adx_state",
   "ma_state",
@@ -90,6 +120,11 @@ const DECISION_HEADERS = [
 function parseCSV(text) {
   // MVP：假設沒有欄位內逗號/引號
   return text.trim().split("\n").map(line => line.split(","));
+}
+
+function isHTMLResponse(text){
+  const t = text.trim().toUpperCase();
+  return t.startsWith("<!DOCTYPE") || t.startsWith("<HTML") || text.includes("<title>Page not found");
 }
 
 function idx(name){ return headers.indexOf(name); }
@@ -195,6 +230,32 @@ function computeSignalsForRow(r){
     action,
     reason: reason.join("；")
   };
+}
+
+function pickMarketValue(headers, row, candidates){
+  for (const name of candidates){
+    const idx = headers.indexOf(name);
+    if (idx >= 0 && row[idx] !== undefined) return row[idx];
+  }
+  return "";
+}
+
+function parseMarketInfo(text){
+  const data = parseCSV(text);
+  const headers = data[0] || [];
+  const row = data[1] || [];
+  const date = pickMarketValue(headers, row, ["date", "Date"]);
+  const close = pickMarketValue(headers, row, ["close", "Close", "price"]);
+  const volume = pickMarketValue(headers, row, ["market_volume", "volume", "vol"]);
+  const value = pickMarketValue(headers, row, ["market_value", "value"]); // 成交金額
+  const ma60 = pickMarketValue(headers, row, ["ma60", "MA60"]);
+  const stateRaw = pickMarketValue(headers, row, ["ma60_state", "MA60_state", "state", "ma_state"]).toUpperCase();
+  const streak = pickMarketValue(headers, row, ["ma60_streak", "ma60_streak_days", "streak"]);
+
+  let state = "";
+  if (stateRaw === "ABOVE" || stateRaw === "BELOW") state = stateRaw;
+
+  return { date, close, volume, value, ma60, state, streak };
 }
 
 function decorateRows(){
@@ -323,6 +384,47 @@ function render(){
   tbl.appendChild(tbody);
 }
 
+function renderMarketGate(){
+  const gate = document.getElementById("market-gate");
+  if (!gate) return;
+
+  if (!marketInfo){
+    gate.classList.remove("is-above", "is-below");
+    gate.querySelector(".market-gate__state").textContent = "載入市場資料失敗";
+    return;
+  }
+
+  const isAbove = marketInfo.state === "ABOVE";
+  const isBelow = marketInfo.state === "BELOW";
+  const stateText = isAbove ? "站上 MA60" : (isBelow ? "跌破 MA60" : "—");
+  const streakDays = marketInfo.streak ? Number(marketInfo.streak) : null;
+  const streakText = (isAbove || isBelow)
+    ? `${isAbove ? "已連續站上" : "已連續跌破"} MA60 ${streakDays ?? "?"} 日`
+    : "—";
+  const staleNotice = (marketInfo.date && latestDate && marketInfo.date !== latestDate)
+    ? '<span class="market-gate__notice">非最新交易日</span>'
+    : "";
+
+  gate.classList.toggle("is-above", isAbove);
+  gate.classList.toggle("is-below", isBelow);
+
+  gate.innerHTML = `
+    <div class="market-gate__header">
+      <div class="market-gate__title">Market Gate (TW TAIEX)</div>
+      <div class="market-gate__state">${stateText}</div>
+    </div>
+    <div class="market-gate__content">
+      <div class="market-gate__index">台灣加權指數</div>
+      <div>日期：${marketInfo.date || "—"}</div>
+      <div>收盤：${marketInfo.close || "—"}</div>
+      <div>成交量/金額：${marketInfo.volume || marketInfo.value || "—"}</div>
+      <div>MA60：${marketInfo.ma60 || "—"}</div>
+      <div class="market-gate__streak">${streakText}</div>
+      ${staleNotice}
+    </div>
+  `;
+}
+
 (async function init(){
   const toggle = document.getElementById("toggle-technical");
   toggle.addEventListener("change", () => {
@@ -330,11 +432,25 @@ function render(){
     render();
   });
 
+  try {
+    const marketRes = await fetch(MARKET_CSV_URL, { cache: "no-store" });
+    const marketText = await marketRes.text();
+    if (isHTMLResponse(marketText)) {
+      marketInfo = null;
+    } else {
+      marketInfo = parseMarketInfo(marketText);
+    }
+  } catch (err) {
+    marketInfo = null;
+  }
+
+  renderMarketGate();
+
   const res = await fetch(CSV_URL, { cache: "no-store" });
   const text = await res.text();
 
   // 防呆：如果抓到的是 HTML（404），直接提示
-  if (text.trim().startsWith("<!DOCTYPE") || text.includes("<title>Page not found")) {
+  if (isHTMLResponse(text)) {
     document.getElementById("meta").innerHTML =
       `<span class="pill">⚠️ CSV_URL 抓到的是 HTML（可能是 GitHub 404 或連錯網址）</span>` +
       `<span class="pill">請改成 Google Sheets 發佈的 output=csv 連結</span>`;
@@ -361,6 +477,7 @@ function render(){
     `Rows: ${rows.length} ｜ Click header to sort ｜ Breakout highlighted` +
     (latestDate ? ` <span class="pill">Latest trade date: ${latestDate}</span> <span class="pill">Stale: ${staleCount}</span>` : "");
 
+  renderMarketGate();
   render();
 })();
 </script>
