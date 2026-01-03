@@ -10,7 +10,9 @@
     th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; }
     th { cursor: pointer; position: sticky; top: 0; background: #f7f7f7; }
     tr.breakout { background: #fff4cc; }
+    tr.stale { opacity: 0.45; } /* 非最新交易日：灰階感（淡化） */
     .meta { color: #666; margin-bottom: 10px; }
+    .pill { display: inline-block; padding: 2px 8px; border: 1px solid #ddd; border-radius: 999px; margin-left: 8px; }
   </style>
 </head>
 <body>
@@ -18,11 +20,13 @@
   <table id="tbl"></table>
 
 <script>
-const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=1518299280&single=true&output=csv"; // 例如 .../pub?gid=xxx&single=true&output=csv
+const CSV_URL = "把你的Signals_TW發佈CSV連結貼在這"; // 例如 .../pub?gid=xxx&single=true&output=csv
+
 let rows = [];
 let headers = [];
 let sortKey = null;
 let sortAsc = false;
+let latestDate = null;
 
 function parseCSV(text) {
   // MVP 簡化版：假設沒有欄位內逗號/引號
@@ -34,12 +38,47 @@ function toVal(x) {
   return Number.isFinite(n) ? n : x;
 }
 
+function getIdx(name) {
+  return headers.indexOf(name);
+}
+
+function calcLatestDate() {
+  const dIdx = getIdx("date");
+  if (dIdx < 0) return null;
+  let max = "";
+  for (const r of rows) {
+    const d = String(r[dIdx] ?? "").trim();
+    // date 格式 YYYY-MM-DD，可用字串比較
+    if (d && d > max) max = d;
+  }
+  return max || null;
+}
+
+function sortRows() {
+  // 先讓 breakout=TRUE 置頂（不破壞你原本習慣）
+  const bIdx = getIdx("breakout");
+
+  rows.sort((a,b) => {
+    const ab = (bIdx>=0 && String(a[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
+    const bb = (bIdx>=0 && String(b[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
+    if (ab !== bb) return bb - ab;
+
+    if (sortKey === null) return 0;
+
+    const va = toVal(a[sortKey]);
+    const vb = toVal(b[sortKey]);
+    if (typeof va === "number" && typeof vb === "number") return sortAsc ? va - vb : vb - va;
+    return sortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+  });
+}
+
 function render() {
   const tbl = document.getElementById("tbl");
   tbl.innerHTML = "";
 
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
+
   headers.forEach((h, idx) => {
     const th = document.createElement("th");
     th.textContent = h;
@@ -51,47 +90,57 @@ function render() {
     };
     trh.appendChild(th);
   });
+
   thead.appendChild(trh);
   tbl.appendChild(thead);
 
   const tbody = document.createElement("tbody");
+  const dIdx = getIdx("date");
+  const bIdx = getIdx("breakout");
+
   rows.forEach(r => {
     const tr = document.createElement("tr");
-    const breakoutIdx = headers.indexOf("breakout");
-    if (breakoutIdx >= 0 && String(r[breakoutIdx]).toUpperCase() === "TRUE") tr.className = "breakout";
+
+    // breakout 上色
+    const isBreakout = (bIdx >= 0 && String(r[bIdx]).toUpperCase() === "TRUE");
+    if (isBreakout) tr.classList.add("breakout");
+
+    // 非最新交易日灰階顯示
+    const d = (dIdx >= 0) ? String(r[dIdx]).trim() : "";
+    if (latestDate && d && d < latestDate) tr.classList.add("stale");
+
     r.forEach(c => {
       const td = document.createElement("td");
       td.textContent = c;
-      tbody.appendChild(tr).appendChild(td);
+      tr.appendChild(td);
     });
+    tbody.appendChild(tr);
   });
+
   tbl.appendChild(tbody);
-}
-
-function sortRows() {
-  // 先讓 breakout=TRUE 置頂
-  const bIdx = headers.indexOf("breakout");
-  rows.sort((a,b) => {
-    const ab = (bIdx>=0 && String(a[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
-    const bb = (bIdx>=0 && String(b[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
-    if (ab !== bb) return bb - ab;
-
-    if (sortKey === null) return 0;
-    const va = toVal(a[sortKey]);
-    const vb = toVal(b[sortKey]);
-    if (typeof va === "number" && typeof vb === "number") return sortAsc ? va - vb : vb - va;
-    return sortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
-  });
 }
 
 (async function init(){
   const res = await fetch(CSV_URL, { cache: "no-store" });
   const text = await res.text();
   const data = parseCSV(text);
+
   headers = data[0];
   rows = data.slice(1);
+
+  latestDate = calcLatestDate();
   sortRows();
-  document.getElementById("meta").textContent = `Rows: ${rows.length} ｜ Click header to sort ｜ Breakout highlighted`;
+
+  const staleCount = (() => {
+    const dIdx = getIdx("date");
+    if (dIdx < 0 || !latestDate) return 0;
+    return rows.filter(r => String(r[dIdx]).trim() && String(r[dIdx]).trim() < latestDate).length;
+  })();
+
+  document.getElementById("meta").innerHTML =
+    `Rows: ${rows.length} ｜ Click header to sort ｜ Breakout highlighted` +
+    (latestDate ? ` <span class="pill">Latest trade date: ${latestDate}</span> <span class="pill">Stale: ${staleCount}</span>` : "");
+
   render();
 })();
 </script>
