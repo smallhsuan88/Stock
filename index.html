@@ -36,6 +36,9 @@
     .market-gate-notes ul { margin: 4px 0 8px 18px; color: #444; }
     .market-gate-notes li { margin: 4px 0; font-size: 13px; }
     .market-gate-notes .notes-caption { font-size: 12px; color: #666; margin-top: 6px; }
+    .market-context-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 2px 6px; border-radius: 8px; font-size: 11px; border: 1px solid #f3d9b4; background: #fff7e6; color: #8a5a00; vertical-align: middle; }
+    .market-context-badge--headwind { border-color: #f0c2c2; background: #fff5f5; color: #a33939; }
+    .market-context-badge--tailwind { border-color: #c8e6c9; background: #e6f4ea; color: #1b5e20; }
   </style>
 </head>
 <body>
@@ -395,6 +398,20 @@ function render(){
         if (v.includes("警戒") || v.includes("減碼")) td.className = "bad";
         else if (v.includes("可加碼") || v.includes("進場")) td.className = "ok";
         else if (v.includes("盤整")) td.className = "warn";
+
+        const isMarketBelow = marketInfo && marketInfo.state === "BELOW";
+        const isMarketAbove = marketInfo && marketInfo.state === "ABOVE";
+        if (isMarketBelow) {
+          const badge = document.createElement("span");
+          badge.className = "market-context-badge market-context-badge--headwind";
+          badge.textContent = "⚠ 市場逆風 · 防禦優先";
+          td.appendChild(badge);
+        } else if (isMarketAbove) {
+          const badge = document.createElement("span");
+          badge.className = "market-context-badge market-context-badge--tailwind";
+          badge.textContent = "市場順風";
+          td.appendChild(badge);
+        }
       }
 
       tr.appendChild(td);
