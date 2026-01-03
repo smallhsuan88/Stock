@@ -16,6 +16,7 @@
     .ok { font-weight: 700; }
     .warn { font-weight: 700; }
     .bad { font-weight: 800; }
+
     .market-gate { border: 1px solid #e0e0e0; background: #fafafa; padding: 12px; border-radius: 10px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
     .market-gate__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
     .market-gate__title { font-weight: 700; font-size: 15px; }
@@ -24,22 +25,30 @@
     .market-gate__state { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-weight: 700; }
     .market-gate__streak { font-weight: 600; }
     .market-gate__notice { font-size: 12px; color: #b26a00; padding: 2px 6px; background: #fff7e6; border-radius: 6px; }
-    .market-gate.is-above { border-color: #2e7d32; background: #f1fbf4; }
-    .market-gate.is-above .market-gate__state { background: #e6f4ea; color: #1b5e20; }
-    .market-gate.is-above .market-gate__streak { color: #1b5e20; }
-    .market-gate.is-below { border-color: #c62828; background: #fff5f5; }
-    .market-gate.is-below .market-gate__state { background: #fdecea; color: #b71c1c; }
-    .market-gate.is-below .market-gate__streak { color: #b71c1c; }
+
+    .market-gate.is-bull { border-color: #2e7d32; background: #f1fbf4; }
+    .market-gate.is-bull .market-gate__state { background: #e6f4ea; color: #1b5e20; }
+    .market-gate.is-bull .market-gate__streak { color: #1b5e20; }
+
+    .market-gate.is-bear { border-color: #c62828; background: #fff5f5; }
+    .market-gate.is-bear .market-gate__state { background: #fdecea; color: #b71c1c; }
+    .market-gate.is-bear .market-gate__streak { color: #b71c1c; }
+
+    .market-gate.is-watch { border-color: #c9a227; background: #fffdf2; }
+    .market-gate.is-watch .market-gate__state { background: #fff3cd; color: #8a6d00; }
+    .market-gate.is-watch .market-gate__streak { color: #8a6d00; }
+
     .market-gate-notes { margin-top: 18px; margin-bottom: 18px; border: 1px solid #e0e0e0; border-radius: 10px; background: #fbfbfb; padding: 12px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
     .market-gate-notes h3 { margin: 0 0 8px; font-size: 15px; }
     .market-gate-notes p { margin: 6px 0; font-size: 13px; color: #444; }
     .market-gate-notes ul { margin: 4px 0 8px 18px; color: #444; }
     .market-gate-notes li { margin: 4px 0; font-size: 13px; }
     .market-gate-notes .notes-caption { font-size: 12px; color: #666; margin-top: 6px; }
+
     .market-context-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 2px 6px; border-radius: 8px; font-size: 11px; border: 1px solid #f3d9b4; background: #fff7e6; color: #8a5a00; vertical-align: middle; }
     .market-context-badge--headwind { border-color: #f0c2c2; background: #fff5f5; color: #a33939; }
     .market-context-badge--tailwind { border-color: #c8e6c9; background: #e6f4ea; color: #1b5e20; }
-    .market-context-badge--neutral { border-color: #e0e0e0; background: #f7f7f7; color: #666; }
+    .market-context-badge--watch { border-color: #f3d9b4; background: #fff7e6; color: #8a5a00; }
   </style>
 </head>
 <body>
@@ -70,65 +79,33 @@
     <ul>
       <li><strong>ma60_state</strong>：ABOVE＝站上 MA60（市場偏多）、BELOW＝跌破 MA60（市場偏空/逆風）。</li>
       <li><strong>ma60_streak_days</strong>：當前 regime（站上/跌破 MA60）已連續維持的交易日數；愈高代表趨勢持續性、延續性較強。</li>
-      <li><strong>確認規則</strong>：
+      <li><strong>燈號規則（你要求的版本）</strong>：
         <ul>
-          <li>ABOVE 且 streak ≥ 3：🟢 多頭確認（綠燈）</li>
-          <li>BELOW 且 streak ≥ 3：🔴 空頭確認（紅燈）</li>
-          <li>其餘：🟡 轉折觀察期（黃燈）</li>
+          <li>ABOVE 且 streak ≥ 3：🟢 綠燈（順風，偏積極）</li>
+          <li>BELOW 且 streak ≥ 3：🔴 紅燈（逆風，防守優先）</li>
+          <li>其餘：🟡 黃燈（轉折觀察期，降低加碼、等確認）</li>
         </ul>
       </li>
     </ul>
     <p class="notes-caption">風險提醒：MA60 僅為市場環境濾網，非保證訊號，可能出現假突破/假跌破，仍須搭配個股訊號與風險控管。</p>
   </div>
 
-  <div class="logic-notes">
-    <h3>判斷邏輯說明</h3>
-    <dl>
-      <dt>adx_state</dt>
-      <dd>判斷條件：依 ADX 數值區分「>40轉弱」、「>40偏熱」、「>25 趨勢」、「<20 盤整」，並判斷是否有轉弱跡象。</dd>
-      <dd>判斷意義：用於分辨市場強弱與是否過熱，作為是否續抱或停利的依據。</dd>
-
-      <dt>ma_state</dt>
-      <dd>判斷條件：檢查 MA10 與 MA20 斜率是否向上，並確認收盤價是否站上 MA20。</dd>
-      <dd>判斷意義：確認均線趨勢與支撐，作為偏多續抱或等待突破的判斷基礎。</dd>
-
-      <dt>vol_state</dt>
-      <dd>判斷條件：確認是否出現突破，且量能倍數是否達到帶量門檻。</dd>
-      <dd>判斷意義：用於辨識帶量突破的有效性，協助決定是否需要進場確認。</dd>
-
-      <dt>overheat_turning</dt>
-      <dd>判斷條件：當 ADX 大於過熱門檻且較前一日下降時為 TRUE。</dd>
-      <dd>判斷意義：提示高檔轉弱風險，做為停止加碼或偏向停利的警訊。</dd>
-
-      <dt>rsi_div_sellhalf</dt>
-      <dd>判斷條件：價格創新高但 RSI 未創新高且仍高於過熱門檻時為 TRUE。</dd>
-      <dd>判斷意義：偵測頂背離，提醒可先賣出部分持股以降低風險。</dd>
-
-      <dt>action</dt>
-      <dd>判斷條件：依突破、趨勢、均線、站上 MA20 與保命條件綜合給出「觀察 / 警戒 / 可加碼」等建議。</dd>
-      <dd>判斷意義：提供當下的操作建議，優先反映風險控制與進出場時機。</dd>
-
-      <dt>reason</dt>
-      <dd>判斷條件：彙整觸發 action 的原因及風險提示（如 ADX 過熱、RSI 背離）。</dd>
-      <dd>判斷意義：讓使用者理解建議背後的依據，便於人工審核與調整策略。</dd>
-    </dl>
-  </div>
-
 <script>
 /** ====== CONFIG ====== */
-const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=1518299280&single=true&output=csv";
-const MARKET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=3585350&single=true&output=csv";
+const CSV_URL =
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=1518299280&single=true&output=csv";
+const MARKET_CSV_URL =
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=3585350&single=true&output=csv";
 
 // 門檻可調
 const TH_ADX_TREND    = 25;
 const TH_ADX_RANGE    = 20;
 const TH_ADX_OVERHEAT = 40;
-
 const TH_VOL_BREAKOUT = 1.5;
 const TH_RSI_OVERHEAT = 70;
 
-// 市場閘門確認日數
-const TH_MARKET_CONFIRM_DAYS = 3;
+// 大盤閘門：連續 >= 3 日才給綠/紅燈，否則黃燈
+const MARKET_STREAK_CONFIRM_DAYS = 3;
 
 let headers = [];
 let baseHeaders = [];
@@ -137,10 +114,7 @@ let sortKey = null;
 let sortAsc = false;
 let latestDate = null;
 let showTechnicalData = false;
-
 let marketInfo = null;
-// green / red / neutral（由 MARKET_CONFIRM_DAYS 決定）
-let marketSignal = "neutral";
 
 const DECISION_HEADERS = [
   "adx_state",
@@ -162,9 +136,39 @@ function isHTMLResponse(text){
   return t.startsWith("<!DOCTYPE") || t.startsWith("<HTML") || text.includes("<title>Page not found");
 }
 
+function looksLikeISODate(s){
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || "").trim());
+}
+
+/**
+ * 修正「多一個空欄位」導致的錯位（你目前 Signals_Market_TW 的 CSV 很像這種）
+ * 典型：headers=8欄，但 row=9欄，且 row[1]===""、row[2]像日期 → 移除 row[1]
+ */
+function normalizeRowToHeaders(headers, row){
+  if (!row) return row;
+  if (row.length === headers.length + 1) {
+    const maybeEmpty = String(row[1] ?? "").trim() === "";
+    const maybeDate = looksLikeISODate(row[2]);
+    if (maybeEmpty && maybeDate) {
+      const fixed = row.slice();
+      fixed.splice(1, 1); // 移除多的空欄
+      return fixed;
+    }
+  }
+  // 若 row 比 headers 長很多，保守裁切（避免越界）
+  if (row.length > headers.length) return row.slice(0, headers.length);
+  // 若 row 比 headers 短，補空值
+  if (row.length < headers.length) {
+    const fixed = row.slice();
+    while (fixed.length < headers.length) fixed.push("");
+    return fixed;
+  }
+  return row;
+}
+
 function idx(name){ return headers.indexOf(name); }
 function num(x){
-  const n = Number(x);
+  const n = Number(String(x ?? "").replace(/,/g,"").trim());
   return Number.isFinite(n) ? n : NaN;
 }
 function boolTrue(x){ return String(x).toUpperCase() === "TRUE"; }
@@ -258,8 +262,8 @@ function computeSignalsForRow(r){
 
 function pickMarketValue(headers, row, candidates){
   for (const name of candidates){
-    const idx = headers.indexOf(name);
-    if (idx >= 0 && row[idx] !== undefined) return row[idx];
+    const i = headers.indexOf(name);
+    if (i >= 0 && row[i] !== undefined) return row[i];
   }
   return "";
 }
@@ -267,19 +271,31 @@ function pickMarketValue(headers, row, candidates){
 function parseMarketInfo(text){
   const data = parseCSV(text);
   const headers = data[0] || [];
-  const row = data[1] || [];
-  const date = pickMarketValue(headers, row, ["date", "Date"]);
-  const close = pickMarketValue(headers, row, ["taiex_close","close", "Close", "price"]);
-  const volume = pickMarketValue(headers, row, ["market_volume", "volume", "vol"]);
-  const value = pickMarketValue(headers, row, ["market_value", "value"]);
-  const ma60 = pickMarketValue(headers, row, ["ma60", "MA60"]);
-  const stateRaw = String(pickMarketValue(headers, row, ["ma60_state", "MA60_state", "state", "ma_state"]) || "").toUpperCase();
-  const streak = pickMarketValue(headers, row, ["ma60_streak", "ma60_streak_days", "streak"]);
+  let row = data[1] || [];
+  row = normalizeRowToHeaders(headers, row);
+
+  const date  = String(pickMarketValue(headers, row, ["date", "Date"]) || "").trim();
+  const close = pickMarketValue(headers, row, ["taiex_close","close","Close","price"]);
+  const volume = pickMarketValue(headers, row, ["market_volume","volume","vol"]);
+  const value  = pickMarketValue(headers, row, ["market_value","value"]);
+  const ma60   = pickMarketValue(headers, row, ["ma60","MA60"]);
+
+  const stateRaw = String(pickMarketValue(headers, row, ["ma60_state","MA60_state","state","ma_state"]) || "").trim().toUpperCase();
+  const streakRaw = pickMarketValue(headers, row, ["ma60_streak_days","ma60_streak","streak"]);
+  const streak = Number.isFinite(Number(streakRaw)) ? Number(streakRaw) : null;
 
   let state = "";
   if (stateRaw === "ABOVE" || stateRaw === "BELOW") state = stateRaw;
 
-  return { date, close, volume, value, ma60, state, streak };
+  return {
+    date,
+    close: (close === "" ? "" : String(close)),
+    volume: (volume === "" ? "" : String(volume)),
+    value: (value === "" ? "" : String(value)),
+    ma60: (ma60 === "" ? "" : String(ma60)),
+    state,
+    streak
+  };
 }
 
 function decorateRows(){
@@ -301,7 +317,6 @@ function decorateRows(){
     let volState = "—";
     if (s.breakout && s.volOk) volState = "✅ 帶量突破";
     else if (s.breakout && !s.volOk) volState = "⚠️ 突破但量不足";
-    else volState = "—";
 
     const overheatTurning = s.overheatTurning ? "TRUE" : "FALSE";
     const rsiDiv = s.rsiDivSellHalf ? "TRUE" : "FALSE";
@@ -339,6 +354,20 @@ function sortRows(){
   });
 }
 
+function getMarketRegime(){
+  // 依你要求：ABOVE/BELOW 且 streak>=3 才給綠/紅，其餘黃
+  if (!marketInfo || !marketInfo.state || !Number.isFinite(marketInfo.streak)) {
+    return { regime: "WATCH", label: "🟡 轉折觀察期" };
+  }
+  if (marketInfo.state === "ABOVE" && marketInfo.streak >= MARKET_STREAK_CONFIRM_DAYS) {
+    return { regime: "BULL", label: "🟢 多頭環境" };
+  }
+  if (marketInfo.state === "BELOW" && marketInfo.streak >= MARKET_STREAK_CONFIRM_DAYS) {
+    return { regime: "BEAR", label: "🔴 空頭環境" };
+  }
+  return { regime: "WATCH", label: "🟡 轉折觀察期" };
+}
+
 function render(){
   const tbl = document.getElementById("tbl");
   tbl.innerHTML = "";
@@ -362,6 +391,8 @@ function render(){
   const oi = idx("overheat_turning");
   const ri = idx("rsi_div_sellhalf");
   const ai = idx("action");
+
+  const marketRegime = getMarketRegime();
 
   rows.forEach(r => {
     const tr = document.createElement("tr");
@@ -387,23 +418,19 @@ function render(){
         else if (v.includes("可加碼") || v.includes("進場")) td.className = "ok";
         else if (v.includes("盤整")) td.className = "warn";
 
-        // 用「確認後」的 marketSignal（避免 streak<3 就當順風/逆風）
-        if (marketSignal === "red") {
-          const badge = document.createElement("span");
+        // 市場情境 badge（依新規則：綠/紅/黃）
+        const badge = document.createElement("span");
+        if (marketRegime.regime === "BEAR") {
           badge.className = "market-context-badge market-context-badge--headwind";
-          badge.textContent = "⚠ 市場逆風 · 防禦優先";
-          td.appendChild(badge);
-        } else if (marketSignal === "green") {
-          const badge = document.createElement("span");
+          badge.textContent = "🔴 市場逆風 · 防禦優先";
+        } else if (marketRegime.regime === "BULL") {
           badge.className = "market-context-badge market-context-badge--tailwind";
-          badge.textContent = "市場順風";
-          td.appendChild(badge);
+          badge.textContent = "🟢 市場順風";
         } else {
-          const badge = document.createElement("span");
-          badge.className = "market-context-badge market-context-badge--neutral";
-          badge.textContent = "市場轉折/觀察";
-          td.appendChild(badge);
+          badge.className = "market-context-badge market-context-badge--watch";
+          badge.textContent = "🟡 市場轉折/觀察";
         }
+        td.appendChild(badge);
       }
 
       tr.appendChild(td);
@@ -415,72 +442,45 @@ function render(){
   tbl.appendChild(tbody);
 }
 
-function computeMarketSignal_(){
-  // 預設：neutral
-  marketSignal = "neutral";
-
-  if (!marketInfo) return;
-
-  const streakDays = Number.isFinite(Number(marketInfo.streak)) ? Number(marketInfo.streak) : NaN;
-  const state = marketInfo.state;
-
-  if (!Number.isFinite(streakDays)) return;
-
-  if (state === "ABOVE" && streakDays >= TH_MARKET_CONFIRM_DAYS) marketSignal = "green";
-  else if (state === "BELOW" && streakDays >= TH_MARKET_CONFIRM_DAYS) marketSignal = "red";
-  else marketSignal = "neutral";
-}
-
 function renderMarketGate(){
   const gate = document.getElementById("market-gate");
   if (!gate) return;
 
   if (!marketInfo){
-    gate.classList.remove("is-above", "is-below");
-    const stateEl = gate.querySelector(".market-gate__state");
-    if (stateEl) stateEl.textContent = "載入市場資料失敗";
+    gate.classList.remove("is-bull","is-bear","is-watch");
+    gate.querySelector(".market-gate__state").textContent = "載入市場資料失敗";
     return;
   }
 
-  const streakDays = Number.isFinite(Number(marketInfo.streak)) ? Number(marketInfo.streak) : null;
+  const marketRegime = getMarketRegime();
 
-  // 先算 marketSignal
-  computeMarketSignal_();
+  gate.classList.toggle("is-bull", marketRegime.regime === "BULL");
+  gate.classList.toggle("is-bear", marketRegime.regime === "BEAR");
+  gate.classList.toggle("is-watch", marketRegime.regime === "WATCH");
 
-  const stateText =
-    marketSignal === "green" ? "🟢 多頭確認（站上 MA60 ≥ 3 日）" :
-    marketSignal === "red"   ? "🔴 空頭確認（跌破 MA60 ≥ 3 日）" :
-                               "🟡 轉折觀察期";
-
-  const isAbove = marketInfo.state === "ABOVE";
-  const isBelow = marketInfo.state === "BELOW";
-
-  const streakText = (isAbove || isBelow)
-    ? `${isAbove ? "已連續站上" : "已連續跌破"} MA60 ${streakDays ?? "?"} 日`
+  const streakDays = Number.isFinite(marketInfo.streak) ? marketInfo.streak : null;
+  const streakText = (marketInfo.state && streakDays !== null)
+    ? `${marketInfo.state === "ABOVE" ? "已連續站上" : "已連續跌破"} MA60 ${streakDays} 日`
     : "—";
 
   const staleNotice = (marketInfo.date && latestDate && marketInfo.date !== latestDate)
     ? '<span class="market-gate__notice">非最新交易日</span>'
     : "";
 
-  // 只在「確認」時上色（符合你的綠/紅燈規則）
-  gate.classList.toggle("is-above", marketSignal === "green");
-  gate.classList.toggle("is-below", marketSignal === "red");
-
   gate.innerHTML = `
-<div class="market-gate__header">
-  <div class="market-gate__title">Market Gate (TW TAIEX)</div>
-  <div class="market-gate__state">${stateText}</div>
-</div>
-<div class="market-gate__content">
-  <div class="market-gate__index">台灣加權指數</div>
-  <div>日期：${marketInfo.date || "—"}</div>
-  <div>收盤：${marketInfo.close || "—"}</div>
-  <div>成交量/金額：${marketInfo.volume || marketInfo.value || "—"}</div>
-  <div>MA60：${marketInfo.ma60 || "—"}</div>
-  <div class="market-gate__streak">${streakText}</div>
-  ${staleNotice}
-</div>
+    <div class="market-gate__header">
+      <div class="market-gate__title">Market Gate (TW TAIEX)</div>
+      <div class="market-gate__state">${marketRegime.label}</div>
+    </div>
+    <div class="market-gate__content">
+      <div class="market-gate__index">台灣加權指數</div>
+      <div>日期：${marketInfo.date || "—"}</div>
+      <div>收盤：${marketInfo.close || "—"}</div>
+      <div>成交量/金額：${marketInfo.volume || marketInfo.value || "—"}</div>
+      <div>MA60：${marketInfo.ma60 || "—"}</div>
+      <div class="market-gate__streak">${streakText}</div>
+      ${staleNotice}
+    </div>
   `;
 }
 
@@ -491,6 +491,7 @@ function renderMarketGate(){
     render();
   });
 
+  // 先抓大盤 Market Gate
   try {
     const marketRes = await fetch(MARKET_CSV_URL, { cache: "no-store" });
     const marketText = await marketRes.text();
@@ -503,9 +504,7 @@ function renderMarketGate(){
     marketInfo = null;
   }
 
-  // 先畫一次（有些人想先看到市場卡片）
-  renderMarketGate();
-
+  // 再抓個股 Signals
   const res = await fetch(CSV_URL, { cache: "no-store" });
   const text = await res.text();
 
@@ -513,13 +512,16 @@ function renderMarketGate(){
     document.getElementById("meta").innerHTML =
       `<span class="pill">⚠️ CSV_URL 抓到的是 HTML（可能是 GitHub 404 或連錯網址）</span>` +
       `<span class="pill">請改成 Google Sheets 發佈的 output=csv 連結</span>`;
+    renderMarketGate();
     return;
   }
 
   const data = parseCSV(text);
-  headers = data[0];
+  headers = data[0] || [];
   baseHeaders = headers.slice();
-  rows = data.slice(1);
+
+  // 正規化每列長度（避免資料列少欄/多欄造成 idx 取值錯亂）
+  rows = (data.slice(1) || []).map(r => normalizeRowToHeaders(headers, r));
 
   latestDate = calcLatestDate();
 
@@ -536,7 +538,6 @@ function renderMarketGate(){
     `Rows: ${rows.length} ｜ Click header to sort ｜ Breakout highlighted` +
     (latestDate ? ` <span class="pill">Latest trade date: ${latestDate}</span> <span class="pill">Stale: ${staleCount}</span>` : "");
 
-  // 最後再畫一次（此時 latestDate 已算出，可顯示「非最新交易日」）
   renderMarketGate();
   render();
 })();
