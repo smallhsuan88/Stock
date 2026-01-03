@@ -49,6 +49,14 @@
     .market-context-badge--headwind { border-color: #f0c2c2; background: #fff5f5; color: #a33939; }
     .market-context-badge--tailwind { border-color: #c8e6c9; background: #e6f4ea; color: #1b5e20; }
     .market-context-badge--watch { border-color: #f3d9b4; background: #fff7e6; color: #8a5a00; }
+
+    .bear-sell-badge { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border-radius:999px; border:1px solid #e0e0e0; background:#fafafa; font-size:12px; font-weight:700; }
+    .bear-sell-badge--all { border-color:#f0c2c2; background:#fff5f5; color:#b71c1c; }
+    .bear-sell-badge--heavy { border-color:#f3d9b4; background:#fff7e6; color:#8a5a00; }
+    .bear-sell-badge--half { border-color:#c8e6c9; background:#e6f4ea; color:#1b5e20; }
+    .bear-sell-badge--na { border-color:#ddd; background:#f7f7f7; color:#666; }
+
+    .controls { margin-bottom: 10px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
   </style>
 </head>
 <body>
@@ -86,6 +94,7 @@
           <li>其餘：🟡 黃燈（轉折觀察期）</li>
         </ul>
       </li>
+      <li><strong>空頭環境加強規則</strong>（只有 Market Gate 為 🔴 空頭環境時啟用）：顯示個股 <strong>ma60</strong> 欄位，並依 <strong>close vs ma20 vs ma60</strong> 給出賣出比率建議。</li>
     </ul>
     <p class="notes-caption">風險提醒：MA60 僅為市場環境濾網，非保證訊號，可能出現假突破/假跌破。</p>
   </div>
@@ -122,6 +131,12 @@ const DECISION_HEADERS = [
   "rsi_div_sellhalf",
   "action",
   "reason"
+];
+
+// ✅ 新增：空頭環境才會顯示的欄位
+const BEAR_HEADERS = [
+  "ma60",
+  "bear_sell_plan"
 ];
 
 function parseCSV(text) {
@@ -174,7 +189,7 @@ function isOKNum(x){ return Number.isFinite(x); }
 /** ✅ 重要修正：空字串不再變 0 */
 function toIntOrNull(x){
   const s = String(x ?? "").trim();
-  if (!s) return null;              // 這行就是把 "" 變 null，不會變 0
+  if (!s) return null;
   const n = Number(s);
   if (!Number.isFinite(n)) return null;
   return Math.trunc(n);
@@ -182,14 +197,13 @@ function toIntOrNull(x){
 
 /** ✅ 備援掃描：找整列最像「streak」的整數（例如 14） */
 function guessStreakFromRow(row){
-  // streak 正常會是 1~300 這種區間（你也可自己調）
   let best = null;
   for (const cell of row){
     const s = String(cell ?? "").trim();
     if (!s) continue;
     if (!/^\d+$/.test(s)) continue;
     const n = Number(s);
-    if (n >= 0 && n <= 400) best = n;   // 取最後一個合理值
+    if (n >= 0 && n <= 400) best = n;
   }
   return best;
 }
@@ -313,11 +327,9 @@ function parseMarketInfo(text){
   let stateRaw = String(pickMarketValue(headers, row, ["ma60_state","MA60_state","state","ma_state"]) || "").trim().toUpperCase();
   let state = (stateRaw === "ABOVE" || stateRaw === "BELOW") ? stateRaw : "";
 
-  // streak：先用正確欄位抓，抓不到就不要變 0
   const streakRaw = pickMarketValue(headers, row, ["ma60_streak_days","ma60_streak","streak"]);
   let streak = toIntOrNull(streakRaw);
 
-  // 備援：如果 state/streak 抓不到，就掃描整列資料補救
   if (!state) state = guessStateFromRow(row);
   if (streak === null) streak = guessStreakFromRow(row);
 
@@ -333,7 +345,7 @@ function parseMarketInfo(text){
 }
 
 function decorateRows(){
-  headers = baseHeaders.concat(DECISION_HEADERS);
+  headers = baseHeaders.concat(DECISION_HEADERS).concat(BEAR_HEADERS);
 
   rows = rows.map(r => {
     const s = computeSignalsForRow(r);
@@ -355,7 +367,34 @@ function decorateRows(){
     const overheatTurning = s.overheatTurning ? "TRUE" : "FALSE";
     const rsiDiv = s.rsiDivSellHalf ? "TRUE" : "FALSE";
 
-    return r.concat([adxState, maState, volState, overheatTurning, rsiDiv, s.action, s.reason || "—"]);
+    // ✅ 空頭環境賣出計畫（只在 render 時空頭才會顯示，但這裡先算好）
+    const close = num(r[idx("close")]);
+    const ma20 = num(r[idx("ma20")]);
+    const ma60 = num(r[idx("ma60")]);
+
+    let bearPlanText = "—";
+    if (isOKNum(close) && isOKNum(ma20) && isOKNum(ma60)) {
+      if (close < ma60) {
+        bearPlanText = "全賣出";
+      } else if (close < ma20 && close >= ma60) {
+        bearPlanText = "賣出75%~100%";
+      } else if (close >= ma20 && close >= ma60) {
+        bearPlanText = "賣出50%";
+      } else {
+        // 理論上會被上面覆蓋，但留個保底
+        bearPlanText = "—";
+      }
+    } else if (isOKNum(close) && !isOKNum(ma60)) {
+      bearPlanText = "—（缺 ma60）";
+    } else {
+      bearPlanText = "—";
+    }
+
+    return r.concat([
+      adxState, maState, volState, overheatTurning, rsiDiv, s.action, s.reason || "—",
+      r[idx("ma60")] ?? "",   // ma60 原始欄位值（可顯示）
+      bearPlanText            // bear_sell_plan
+    ]);
   });
 }
 
@@ -363,7 +402,15 @@ function getDisplayHeaders(){
   const volIdx = baseHeaders.indexOf("volume");
   const beforeVolume = volIdx >= 0 ? baseHeaders.slice(0, volIdx + 1) : baseHeaders.slice();
   const afterVolume = volIdx >= 0 ? baseHeaders.slice(volIdx + 1) : [];
+
   const visible = beforeVolume.concat(DECISION_HEADERS);
+
+  // ✅ 只有 Market Gate = 空頭環境才插入 ma60 + bear_sell_plan
+  const regime = getMarketRegime();
+  if (regime.regime === "BEAR") {
+    visible.push(...BEAR_HEADERS);
+  }
+
   if (showTechnicalData) visible.push(...afterVolume);
   return visible;
 }
@@ -424,6 +471,7 @@ function render(){
   const oi = idx("overheat_turning");
   const ri = idx("rsi_div_sellhalf");
   const ai = idx("action");
+  const mpi = idx("bear_sell_plan");
 
   const marketRegime = getMarketRegime();
 
@@ -463,6 +511,20 @@ function render(){
           badge.textContent = "🟡 市場轉折/觀察";
         }
         td.appendChild(badge);
+      }
+
+      // ✅ 空頭賣出計畫：用 badge 強化可讀性
+      if (colIdx === mpi) {
+        const v = String(c ?? "").trim();
+        const span = document.createElement("span");
+        span.className = "bear-sell-badge bear-sell-badge--na";
+        if (v.includes("全賣出")) span.className = "bear-sell-badge bear-sell-badge--all";
+        else if (v.includes("75%")) span.className = "bear-sell-badge bear-sell-badge--heavy";
+        else if (v.includes("50%")) span.className = "bear-sell-badge bear-sell-badge--half";
+
+        span.textContent = v || "—";
+        td.textContent = "";
+        td.appendChild(span);
       }
 
       tr.appendChild(td);
@@ -570,6 +632,7 @@ function renderMarketGate(){
   renderMarketGate();
   render();
 })();
+
 </script>
 </body>
 </html>
