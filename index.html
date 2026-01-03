@@ -78,16 +78,16 @@
     <p>MA60 為市場的中期多空分界（bull/bear regime divider），用來判斷整體環境是順風或逆風。</p>
     <ul>
       <li><strong>ma60_state</strong>：ABOVE＝站上 MA60（市場偏多）、BELOW＝跌破 MA60（市場偏空/逆風）。</li>
-      <li><strong>ma60_streak_days</strong>：當前 regime（站上/跌破 MA60）已連續維持的交易日數；愈高代表趨勢持續性、延續性較強。</li>
-      <li><strong>燈號規則（你要求的版本）</strong>：
+      <li><strong>ma60_streak_days</strong>：當前 regime（站上/跌破 MA60）已連續維持的交易日數。</li>
+      <li><strong>燈號規則</strong>：
         <ul>
-          <li>ABOVE 且 streak ≥ 3：🟢 綠燈（順風，偏積極）</li>
-          <li>BELOW 且 streak ≥ 3：🔴 紅燈（逆風，防守優先）</li>
-          <li>其餘：🟡 黃燈（轉折觀察期，降低加碼、等確認）</li>
+          <li>ABOVE 且 streak ≥ 3：🟢 綠燈（順風）</li>
+          <li>BELOW 且 streak ≥ 3：🔴 紅燈（逆風）</li>
+          <li>其餘：🟡 黃燈（轉折觀察期）</li>
         </ul>
       </li>
     </ul>
-    <p class="notes-caption">風險提醒：MA60 僅為市場環境濾網，非保證訊號，可能出現假突破/假跌破，仍須搭配個股訊號與風險控管。</p>
+    <p class="notes-caption">風險提醒：MA60 僅為市場環境濾網，非保證訊號，可能出現假突破/假跌破。</p>
   </div>
 
 <script>
@@ -97,14 +97,12 @@ const CSV_URL =
 const MARKET_CSV_URL =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=3585350&single=true&output=csv";
 
-// 門檻可調
 const TH_ADX_TREND    = 25;
 const TH_ADX_RANGE    = 20;
 const TH_ADX_OVERHEAT = 40;
 const TH_VOL_BREAKOUT = 1.5;
 const TH_RSI_OVERHEAT = 70;
 
-// 大盤閘門：連續 >= 3 日才給綠/紅燈，否則黃燈
 const MARKET_STREAK_CONFIRM_DAYS = 3;
 
 let headers = [];
@@ -127,7 +125,6 @@ const DECISION_HEADERS = [
 ];
 
 function parseCSV(text) {
-  // MVP：假設沒有欄位內逗號/引號
   return text.trim().split("\n").map(line => line.split(","));
 }
 
@@ -140,24 +137,22 @@ function looksLikeISODate(s){
   return /^\d{4}-\d{2}-\d{2}$/.test(String(s || "").trim());
 }
 
-/**
- * 修正「多一個空欄位」導致的錯位（你目前 Signals_Market_TW 的 CSV 很像這種）
- * 典型：headers=8欄，但 row=9欄，且 row[1]===""、row[2]像日期 → 移除 row[1]
- */
 function normalizeRowToHeaders(headers, row){
   if (!row) return row;
+
+  // 典型：多出一個空欄導致 9 vs 8
   if (row.length === headers.length + 1) {
     const maybeEmpty = String(row[1] ?? "").trim() === "";
     const maybeDate = looksLikeISODate(row[2]);
     if (maybeEmpty && maybeDate) {
       const fixed = row.slice();
-      fixed.splice(1, 1); // 移除多的空欄
+      fixed.splice(1, 1);
       return fixed;
     }
   }
-  // 若 row 比 headers 長很多，保守裁切（避免越界）
+
   if (row.length > headers.length) return row.slice(0, headers.length);
-  // 若 row 比 headers 短，補空值
+
   if (row.length < headers.length) {
     const fixed = row.slice();
     while (fixed.length < headers.length) fixed.push("");
@@ -167,12 +162,46 @@ function normalizeRowToHeaders(headers, row){
 }
 
 function idx(name){ return headers.indexOf(name); }
+
 function num(x){
   const n = Number(String(x ?? "").replace(/,/g,"").trim());
   return Number.isFinite(n) ? n : NaN;
 }
+
 function boolTrue(x){ return String(x).toUpperCase() === "TRUE"; }
 function isOKNum(x){ return Number.isFinite(x); }
+
+/** ✅ 重要修正：空字串不再變 0 */
+function toIntOrNull(x){
+  const s = String(x ?? "").trim();
+  if (!s) return null;              // 這行就是把 "" 變 null，不會變 0
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
+/** ✅ 備援掃描：找整列最像「streak」的整數（例如 14） */
+function guessStreakFromRow(row){
+  // streak 正常會是 1~300 這種區間（你也可自己調）
+  let best = null;
+  for (const cell of row){
+    const s = String(cell ?? "").trim();
+    if (!s) continue;
+    if (!/^\d+$/.test(s)) continue;
+    const n = Number(s);
+    if (n >= 0 && n <= 400) best = n;   // 取最後一個合理值
+  }
+  return best;
+}
+
+/** ✅ 備援掃描：找 ABOVE/BELOW */
+function guessStateFromRow(row){
+  for (const cell of row){
+    const s = String(cell ?? "").trim().toUpperCase();
+    if (s === "ABOVE" || s === "BELOW") return s;
+  }
+  return "";
+}
 
 function calcLatestDate(){
   const di = idx("date");
@@ -268,6 +297,7 @@ function pickMarketValue(headers, row, candidates){
   return "";
 }
 
+/** ✅ 這裡是修正重點：避免 "" -> 0，並加備援抓 14 */
 function parseMarketInfo(text){
   const data = parseCSV(text);
   const headers = data[0] || [];
@@ -280,12 +310,16 @@ function parseMarketInfo(text){
   const value  = pickMarketValue(headers, row, ["market_value","value"]);
   const ma60   = pickMarketValue(headers, row, ["ma60","MA60"]);
 
-  const stateRaw = String(pickMarketValue(headers, row, ["ma60_state","MA60_state","state","ma_state"]) || "").trim().toUpperCase();
-  const streakRaw = pickMarketValue(headers, row, ["ma60_streak_days","ma60_streak","streak"]);
-  const streak = Number.isFinite(Number(streakRaw)) ? Number(streakRaw) : null;
+  let stateRaw = String(pickMarketValue(headers, row, ["ma60_state","MA60_state","state","ma_state"]) || "").trim().toUpperCase();
+  let state = (stateRaw === "ABOVE" || stateRaw === "BELOW") ? stateRaw : "";
 
-  let state = "";
-  if (stateRaw === "ABOVE" || stateRaw === "BELOW") state = stateRaw;
+  // streak：先用正確欄位抓，抓不到就不要變 0
+  const streakRaw = pickMarketValue(headers, row, ["ma60_streak_days","ma60_streak","streak"]);
+  let streak = toIntOrNull(streakRaw);
+
+  // 備援：如果 state/streak 抓不到，就掃描整列資料補救
+  if (!state) state = guessStateFromRow(row);
+  if (streak === null) streak = guessStreakFromRow(row);
 
   return {
     date,
@@ -355,7 +389,6 @@ function sortRows(){
 }
 
 function getMarketRegime(){
-  // 依你要求：ABOVE/BELOW 且 streak>=3 才給綠/紅，其餘黃
   if (!marketInfo || !marketInfo.state || !Number.isFinite(marketInfo.streak)) {
     return { regime: "WATCH", label: "🟡 轉折觀察期" };
   }
@@ -418,7 +451,6 @@ function render(){
         else if (v.includes("可加碼") || v.includes("進場")) td.className = "ok";
         else if (v.includes("盤整")) td.className = "warn";
 
-        // 市場情境 badge（依新規則：綠/紅/黃）
         const badge = document.createElement("span");
         if (marketRegime.regime === "BEAR") {
           badge.className = "market-context-badge market-context-badge--headwind";
@@ -491,7 +523,6 @@ function renderMarketGate(){
     render();
   });
 
-  // 先抓大盤 Market Gate
   try {
     const marketRes = await fetch(MARKET_CSV_URL, { cache: "no-store" });
     const marketText = await marketRes.text();
@@ -504,7 +535,6 @@ function renderMarketGate(){
     marketInfo = null;
   }
 
-  // 再抓個股 Signals
   const res = await fetch(CSV_URL, { cache: "no-store" });
   const text = await res.text();
 
@@ -520,7 +550,6 @@ function renderMarketGate(){
   headers = data[0] || [];
   baseHeaders = headers.slice();
 
-  // 正規化每列長度（避免資料列少欄/多欄造成 idx 取值錯亂）
   rows = (data.slice(1) || []).map(r => normalizeRowToHeaders(headers, r));
 
   latestDate = calcLatestDate();
