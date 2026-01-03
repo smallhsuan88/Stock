@@ -20,7 +20,43 @@
 </head>
 <body>
   <div class="meta" id="meta"></div>
+  <div class="controls">
+    <label><input type="checkbox" id="toggle-technical" /> 顯示技術數據</label>
+  </div>
   <table id="tbl"></table>
+
+  <div class="logic-notes">
+    <h3>判斷邏輯說明</h3>
+    <dl>
+      <dt>adx_state</dt>
+      <dd>判斷條件：依 ADX 數值區分「>40轉弱」、「>40偏熱」、「>25 趨勢」、「<20 盤整」，並判斷是否有轉弱跡象。</dd>
+      <dd>判斷意義：用於分辨市場強弱與是否過熱，作為是否續抱或停利的依據。</dd>
+
+      <dt>ma_state</dt>
+      <dd>判斷條件：檢查 MA10 與 MA20 斜率是否向上，並確認收盤價是否站上 MA20。</dd>
+      <dd>判斷意義：確認均線趨勢與支撐，作為偏多續抱或等待突破的判斷基礎。</dd>
+
+      <dt>vol_state</dt>
+      <dd>判斷條件：確認是否出現突破，且量能倍數是否達到帶量門檻。</dd>
+      <dd>判斷意義：用於辨識帶量突破的有效性，協助決定是否需要進場確認。</dd>
+
+      <dt>overheat_turning</dt>
+      <dd>判斷條件：當 ADX 大於過熱門檻且較前一日下降時為 TRUE。</dd>
+      <dd>判斷意義：提示高檔轉弱風險，做為停止加碼或偏向停利的警訊。</dd>
+
+      <dt>rsi_div_sellhalf</dt>
+      <dd>判斷條件：價格創新高但 RSI 未創新高且仍高於過熱門檻時為 TRUE。</dd>
+      <dd>判斷意義：偵測頂背離，提醒可先賣出部分持股以降低風險。</dd>
+
+      <dt>action</dt>
+      <dd>判斷條件：依突破、趨勢、均線、站上 MA20 與保命條件綜合給出「觀察 / 警戒 / 可加碼」等建議。</dd>
+      <dd>判斷意義：提供當下的操作建議，優先反映風險控制與進出場時機。</dd>
+
+      <dt>reason</dt>
+      <dd>判斷條件：彙整觸發 action 的原因及風險提示（如 ADX 過熱、RSI 背離）。</dd>
+      <dd>判斷意義：讓使用者理解建議背後的依據，便於人工審核與調整策略。</dd>
+    </dl>
+  </div>
 
 <script>
 /** ====== CONFIG ====== */
@@ -35,10 +71,21 @@ const TH_VOL_BREAKOUT = 1.5;   // 1.5~2.0
 const TH_RSI_OVERHEAT = 70;
 
 let headers = [];
+let baseHeaders = [];
 let rows = [];
 let sortKey = null;
 let sortAsc = false;
 let latestDate = null;
+let showTechnicalData = false;
+const DECISION_HEADERS = [
+  "adx_state",
+  "ma_state",
+  "vol_state",
+  "overheat_turning",
+  "rsi_div_sellhalf",
+  "action",
+  "reason"
+];
 
 function parseCSV(text) {
   // MVP：假設沒有欄位內逗號/引號
@@ -152,16 +199,7 @@ function computeSignalsForRow(r){
 
 function decorateRows(){
   // 前端新增欄位
-  const extraHeaders = [
-    "adx_state",
-    "ma_state",
-    "vol_state",
-    "overheat_turning",
-    "rsi_div_sellhalf",
-    "action",
-    "reason"
-  ];
-  headers = headers.concat(extraHeaders);
+  headers = baseHeaders.concat(DECISION_HEADERS);
 
   rows = rows.map(r => {
     const s = computeSignalsForRow(r);
@@ -191,6 +229,15 @@ function decorateRows(){
   });
 }
 
+function getDisplayHeaders(){
+  const volIdx = baseHeaders.indexOf("volume");
+  const beforeVolume = volIdx >= 0 ? baseHeaders.slice(0, volIdx + 1) : baseHeaders.slice();
+  const afterVolume = volIdx >= 0 ? baseHeaders.slice(volIdx + 1) : [];
+  const visible = beforeVolume.concat(DECISION_HEADERS);
+  if (showTechnicalData) visible.push(...afterVolume);
+  return visible;
+}
+
 function toVal(x){
   const n = Number(x);
   return Number.isFinite(n) ? n : x;
@@ -218,10 +265,12 @@ function render(){
 
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
-  headers.forEach((h, i) => {
+  const displayHeaders = getDisplayHeaders();
+  displayHeaders.forEach(h => {
     const th = document.createElement("th");
     th.textContent = h;
-    th.onclick = () => { sortKey = i; sortAsc = !sortAsc; sortRows(); render(); };
+    const headerIdx = idx(h);
+    th.onclick = () => { sortKey = headerIdx; sortAsc = !sortAsc; sortRows(); render(); };
     trh.appendChild(th);
   });
   thead.appendChild(trh);
@@ -245,7 +294,9 @@ function render(){
     const d = (di>=0) ? String(r[di] ?? "").trim() : "";
     if (latestDate && d && d < latestDate) tr.classList.add("stale");
 
-    r.forEach((c, colIdx) => {
+    displayHeaders.forEach(h => {
+      const colIdx = idx(h);
+      const c = r[colIdx];
       const td = document.createElement("td");
       td.textContent = c;
 
@@ -273,6 +324,12 @@ function render(){
 }
 
 (async function init(){
+  const toggle = document.getElementById("toggle-technical");
+  toggle.addEventListener("change", () => {
+    showTechnicalData = toggle.checked;
+    render();
+  });
+
   const res = await fetch(CSV_URL, { cache: "no-store" });
   const text = await res.text();
 
@@ -286,6 +343,7 @@ function render(){
 
   const data = parseCSV(text);
   headers = data[0];
+  baseHeaders = headers.slice();
   rows = data.slice(1);
 
   latestDate = calcLatestDate();
