@@ -3,16 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Signals TW Dashboard (MVP)</title>
+  <title>Stock Signals (TW) Dashboard</title>
   <style>
     body { font-family: system-ui, -apple-system, "Segoe UI", Arial; margin: 16px; }
     table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; }
-    th { cursor: pointer; position: sticky; top: 0; background: #f7f7f7; }
+    th, td { border: 1px solid #ddd; padding: 8px; font-size: 13px; white-space: nowrap; }
+    th { cursor: pointer; position: sticky; top: 0; background: #f7f7f7; z-index: 1; }
     tr.breakout { background: #fff4cc; }
-    tr.stale { opacity: 0.45; } /* 非最新交易日：灰階感（淡化） */
+    tr.stale { opacity: 0.45; }
     .meta { color: #666; margin-bottom: 10px; }
     .pill { display: inline-block; padding: 2px 8px; border: 1px solid #ddd; border-radius: 999px; margin-left: 8px; }
+    .ok { font-weight: 700; }
+    .warn { font-weight: 700; }
+    .bad { font-weight: 800; }
   </style>
 </head>
 <body>
@@ -20,51 +23,188 @@
   <table id="tbl"></table>
 
 <script>
-const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=1518299280&single=true&output=csv"; // 例如 .../pub?gid=xxx&single=true&output=csv
+/** ====== CONFIG ====== */
+const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=1518299280&single=true&output=csv";  // 例如 .../pub?gid=xxx&single=true&output=csv
 
-let rows = [];
+// 門檻可調
+const TH_ADX_TREND    = 25;
+const TH_ADX_RANGE    = 20;
+const TH_ADX_OVERHEAT = 40;
+
+const TH_VOL_BREAKOUT = 1.5;   // 1.5~2.0
+const TH_RSI_OVERHEAT = 70;
+
 let headers = [];
+let rows = [];
 let sortKey = null;
 let sortAsc = false;
 let latestDate = null;
 
 function parseCSV(text) {
-  // MVP 簡化版：假設沒有欄位內逗號/引號
+  // MVP：假設沒有欄位內逗號/引號
   return text.trim().split("\n").map(line => line.split(","));
 }
 
-function toVal(x) {
+function idx(name){ return headers.indexOf(name); }
+function num(x){
   const n = Number(x);
-  return Number.isFinite(n) ? n : x;
+  return Number.isFinite(n) ? n : NaN;
 }
+function boolTrue(x){ return String(x).toUpperCase() === "TRUE"; }
+function isOKNum(x){ return Number.isFinite(x); }
 
-function getIdx(name) {
-  return headers.indexOf(name);
-}
-
-function calcLatestDate() {
-  const dIdx = getIdx("date");
-  if (dIdx < 0) return null;
+function calcLatestDate(){
+  const di = idx("date");
+  if (di < 0) return null;
   let max = "";
-  for (const r of rows) {
-    const d = String(r[dIdx] ?? "").trim();
-    // date 格式 YYYY-MM-DD，可用字串比較
+  for (const r of rows){
+    const d = String(r[di] ?? "").trim();
     if (d && d > max) max = d;
   }
   return max || null;
 }
 
-function sortRows() {
-  // 先讓 breakout=TRUE 置頂（不破壞你原本習慣）
-  const bIdx = getIdx("breakout");
+function computeSignalsForRow(r){
+  const close = num(r[idx("close")]);
+  const ma20 = num(r[idx("ma20")]);
+  const ma10s = num(r[idx("ma10_slope")]);
+  const ma20s = num(r[idx("ma20_slope")]);
 
+  const adx14 = num(r[idx("adx14")]);
+  const adx14_prev = num(r[idx("adx14_prev")]);
+
+  const rsi14 = num(r[idx("rsi14")]);
+  const rsi14_prev = num(r[idx("rsi14_prev")]);
+
+  const volRatio = num(r[idx("vol_ratio")]);
+  const high40_prev = num(r[idx("high40_prev")]);
+
+  const breakout = boolTrue(r[idx("breakout")]);
+
+  // 1) ADX 狀態
+  const trendOn = isOKNum(adx14) && adx14 > TH_ADX_TREND;
+  const range = isOKNum(adx14) && adx14 < TH_ADX_RANGE;
+  const overheat = isOKNum(adx14) && adx14 > TH_ADX_OVERHEAT;
+
+  // ADX>40 且轉弱（需要 prev）
+  const overheatTurning = overheat && isOKNum(adx14_prev) && (adx14 < adx14_prev);
+
+  // 2) MA 條件
+  const maUp = isOKNum(ma10s) && isOKNum(ma20s) && ma10s > 0 && ma20s > 0;
+  const aboveMa20 = isOKNum(close) && isOKNum(ma20) && close > ma20;
+
+  // 3) 帶量突破
+  const volOk = isOKNum(volRatio) && volRatio >= TH_VOL_BREAKOUT;
+
+  // 4) 保命：跌破 MA20
+  const closeLtMa20 = isOKNum(close) && isOKNum(ma20) && close < ma20;
+
+  // 5) 頂背離賣一半（MVP版）
+  // 條件：今天創新高(> high40_prev) 且 RSI>=70 且 RSI 沒有創新高（<= rsi14_prev）
+  const madeNewHigh = isOKNum(close) && isOKNum(high40_prev) && (close > high40_prev);
+  const rsiHot = isOKNum(rsi14) && (rsi14 >= TH_RSI_OVERHEAT);
+  const rsiNotConfirm = rsiHot && isOKNum(rsi14_prev) && (rsi14 <= rsi14_prev);
+  const rsiDivSellHalf = madeNewHigh && rsiNotConfirm;
+
+  // ===== Action 建議（偏保守）=====
+  let action = "觀察";
+  let reason = [];
+
+  if (closeLtMa20){
+    action = "警戒/減碼";
+    reason.push("收盤跌破MA20（保命機制）");
+  } else {
+    if (breakout && volOk && trendOn && maUp && aboveMa20){
+      action = "可加碼/進場確認";
+      reason.push("突破成立 + 帶量 + 趨勢>25 + 均線翻揚 + 站上MA20");
+    } else if (breakout && volOk){
+      action = "突破成立(待確認)";
+      reason.push("帶量突破成立，但趨勢/均線條件未齊");
+      if (!trendOn) reason.push("ADX未>25");
+      if (!maUp) reason.push("均線未同步翻揚");
+      if (!aboveMa20) reason.push("未站上MA20");
+    } else if (trendOn && maUp && aboveMa20){
+      action = "偏多續抱/等待突破";
+      reason.push("趨勢成形 + 均線翻揚 + 站上MA20");
+    } else if (range){
+      action = "盤整(不追價)";
+      reason.push("ADX<20盤整濾網");
+    }
+  }
+
+  // 風險提示（不一定改 action，但會寫進 reason）
+  if (overheatTurning) reason.push("🔥 ADX>40 且轉弱：停止加碼/偏停利");
+  else if (overheat) reason.push("ADX>40 偏熱：需留意是否轉弱（看 prev）");
+
+  if (rsiDivSellHalf) reason.push("⚠️ 頂背離：價創高但RSI未創高（建議賣一半）");
+  else if (rsiHot) reason.push("RSI>=70 偏熱：注意背離風險");
+
+  return {
+    trendOn, range, overheat, overheatTurning,
+    maUp, aboveMa20,
+    volOk, breakout,
+    closeLtMa20,
+    rsiDivSellHalf,
+    action,
+    reason: reason.join("；")
+  };
+}
+
+function decorateRows(){
+  // 前端新增欄位
+  const extraHeaders = [
+    "adx_state",
+    "ma_state",
+    "vol_state",
+    "overheat_turning",
+    "rsi_div_sellhalf",
+    "action",
+    "reason"
+  ];
+  headers = headers.concat(extraHeaders);
+
+  rows = rows.map(r => {
+    const s = computeSignalsForRow(r);
+
+    // ADX狀態
+    let adxState = "—";
+    if (s.overheatTurning) adxState = "🔥 ADX>40且轉弱";
+    else if (s.overheat) adxState = "🔥 ADX>40偏熱";
+    else if (s.trendOn) adxState = "✅ ADX>25趨勢";
+    else if (s.range) adxState = "🟦 ADX<20盤整";
+    else adxState = "🟨 ADX 20~25過渡";
+
+    // MA狀態
+    let maState = (s.maUp ? "✅ 均線翻揚" : "—");
+    maState += s.aboveMa20 ? " + 站上MA20" : " + 未站上MA20";
+
+    // 量能狀態
+    let volState = "—";
+    if (s.breakout && s.volOk) volState = "✅ 帶量突破";
+    else if (s.breakout && !s.volOk) volState = "⚠️ 突破但量不足";
+    else volState = "—";
+
+    const overheatTurning = s.overheatTurning ? "TRUE" : "FALSE";
+    const rsiDiv = s.rsiDivSellHalf ? "TRUE" : "FALSE";
+
+    return r.concat([adxState, maState, volState, overheatTurning, rsiDiv, s.action, s.reason || "—"]);
+  });
+}
+
+function toVal(x){
+  const n = Number(x);
+  return Number.isFinite(n) ? n : x;
+}
+
+function sortRows(){
+  // breakout 置頂（然後再依 sortKey）
+  const bIdx = idx("breakout");
   rows.sort((a,b) => {
     const ab = (bIdx>=0 && String(a[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
     const bb = (bIdx>=0 && String(b[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
     if (ab !== bb) return bb - ab;
 
     if (sortKey === null) return 0;
-
     const va = toVal(a[sortKey]);
     const vb = toVal(b[sortKey]);
     if (typeof va === "number" && typeof vb === "number") return sortAsc ? va - vb : vb - va;
@@ -72,48 +212,60 @@ function sortRows() {
   });
 }
 
-function render() {
+function render(){
   const tbl = document.getElementById("tbl");
   tbl.innerHTML = "";
 
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
-
-  headers.forEach((h, idx) => {
+  headers.forEach((h, i) => {
     const th = document.createElement("th");
     th.textContent = h;
-    th.onclick = () => {
-      sortKey = idx;
-      sortAsc = !sortAsc;
-      sortRows();
-      render();
-    };
+    th.onclick = () => { sortKey = i; sortAsc = !sortAsc; sortRows(); render(); };
     trh.appendChild(th);
   });
-
   thead.appendChild(trh);
   tbl.appendChild(thead);
 
   const tbody = document.createElement("tbody");
-  const dIdx = getIdx("date");
-  const bIdx = getIdx("breakout");
+  const di = idx("date");
+  const bi = idx("breakout");
+  const oi = idx("overheat_turning");
+  const ri = idx("rsi_div_sellhalf");
+  const ai = idx("action");
 
   rows.forEach(r => {
     const tr = document.createElement("tr");
 
-    // breakout 上色
-    const isBreakout = (bIdx >= 0 && String(r[bIdx]).toUpperCase() === "TRUE");
+    // breakout 黃底
+    const isBreakout = (bi >= 0 && String(r[bi]).toUpperCase()==="TRUE");
     if (isBreakout) tr.classList.add("breakout");
 
-    // 非最新交易日灰階顯示
-    const d = (dIdx >= 0) ? String(r[dIdx]).trim() : "";
+    // 非最新交易日灰階
+    const d = (di>=0) ? String(r[di] ?? "").trim() : "";
     if (latestDate && d && d < latestDate) tr.classList.add("stale");
 
-    r.forEach(c => {
+    r.forEach((c, colIdx) => {
       const td = document.createElement("td");
       td.textContent = c;
+
+      // overheat_turning TRUE → 加粗
+      if (colIdx === oi && String(c).toUpperCase()==="TRUE") td.className = "warn";
+
+      // rsi_div_sellhalf TRUE → 加粗
+      if (colIdx === ri && String(c).toUpperCase()==="TRUE") td.className = "warn";
+
+      // action 欄醒目
+      if (colIdx === ai) {
+        const v = String(c);
+        if (v.includes("警戒") || v.includes("減碼")) td.className = "bad";
+        else if (v.includes("可加碼") || v.includes("進場")) td.className = "ok";
+        else if (v.includes("盤整")) td.className = "warn";
+      }
+
       tr.appendChild(td);
     });
+
     tbody.appendChild(tr);
   });
 
@@ -123,18 +275,28 @@ function render() {
 (async function init(){
   const res = await fetch(CSV_URL, { cache: "no-store" });
   const text = await res.text();
-  const data = parseCSV(text);
 
+  // 防呆：如果抓到的是 HTML（404），直接提示
+  if (text.trim().startsWith("<!DOCTYPE") || text.includes("<title>Page not found")) {
+    document.getElementById("meta").innerHTML =
+      `<span class="pill">⚠️ CSV_URL 抓到的是 HTML（可能是 GitHub 404 或連錯網址）</span>` +
+      `<span class="pill">請改成 Google Sheets 發佈的 output=csv 連結</span>`;
+    return;
+  }
+
+  const data = parseCSV(text);
   headers = data[0];
   rows = data.slice(1);
 
   latestDate = calcLatestDate();
+
+  decorateRows();
   sortRows();
 
   const staleCount = (() => {
-    const dIdx = getIdx("date");
-    if (dIdx < 0 || !latestDate) return 0;
-    return rows.filter(r => String(r[dIdx]).trim() && String(r[dIdx]).trim() < latestDate).length;
+    const di = idx("date");
+    if (di < 0 || !latestDate) return 0;
+    return rows.filter(r => String(r[di]).trim() && String(r[di]).trim() < latestDate).length;
   })();
 
   document.getElementById("meta").innerHTML =
