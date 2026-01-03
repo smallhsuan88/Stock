@@ -2,7 +2,7 @@
  *  TW MVP - Stable Version (with prev fields)
  *  - Source: TWSE STOCK_DAY (monthly)
  *  - Output: Raw_TW + Signals_TW + Log
- *  - Indicators: MA10/MA20, VOL_MA20(prev), RSI14, ADX14, High40(prev), Breakout
+ *  - Indicators: MA10/MA20/MA60, VOL_MA20(prev), RSI14, ADX14, High40(prev), Breakout
  *  - Breakout: close > high40_prev AND volume > vol_ma20(prev)
  * ========================= **/
 
@@ -11,11 +11,12 @@ const SHEET_RAW     = 'Raw_TW';
 const SHEET_SIGNALS = 'Signals_TW';
 const SHEET_LOG     = 'Log';
 
-const LOOKBACK_MONTHS = 6;   // 建議 6 個月更穩（仍不會太慢）
+const LOOKBACK_MONTHS = 6;   // 若要 MA60 覆蓋率更高，可改 9 或 12
 const HIGH_N   = 40;
 const VOL_MA_N = 20;
-const MA10_N   = 10;
-const MA20_N   = 20;
+const TW_MA10_N   = 10;
+const TW_MA20_N   = 20;
+const TW_MA60_N   = 60;
 
 const SLEEP_MS_EACH_TICKER = 250; // 避免被節流
 
@@ -33,7 +34,7 @@ function initSheets_TW() {
   if (sig.getLastRow() === 0) {
     sig.appendRow([
       'market','ticker','date','close','volume',
-      'ma10','ma20','ma10_slope','ma20_slope',
+      'ma10','ma20','ma60','ma10_slope','ma20_slope','ma60_slope',
       'vol_ma20','vol_ratio',
       'rsi14','rsi14_prev',
       'adx14','adx14_prev',
@@ -64,7 +65,7 @@ function runTW_MVP() {
   sig.clearContents();
   sig.appendRow([
     'market','ticker','date','close','volume',
-    'ma10','ma20','ma10_slope','ma20_slope',
+    'ma10','ma20','ma60','ma10_slope','ma20_slope','ma60_slope',
     'vol_ma20','vol_ratio',
     'rsi14','rsi14_prev',
     'adx14','adx14_prev',
@@ -97,8 +98,10 @@ function runTW_MVP() {
 
         calc.ma10,
         calc.ma20,
+        calc.ma60,
         calc.ma10_slope,
         calc.ma20_slope,
+        calc.ma60_slope,
 
         calc.vol_ma20,
         calc.vol_ratio,
@@ -173,8 +176,6 @@ function fetchTWSEStockDayMonths_(ticker, monthsBack) {
 
     if (!json || !json.data || !Array.isArray(json.data)) continue;
 
-    // 常見欄位：
-    // ["114/01/02","成交股數","成交金額","開盤","最高","最低","收盤","漲跌","成交筆數"]
     json.data.forEach(arr => {
       const dateISO = rocToISO_(arr[0]);
       if (!dateISO) return;
@@ -185,7 +186,6 @@ function fetchTWSEStockDayMonths_(ticker, monthsBack) {
       const low   = parseNum_(arr[5]);
       const close = parseNum_(arr[6]);
 
-      // 基本防呆：若 close=0 代表資料怪，略過
       if (!isFinite(close) || close <= 0) return;
 
       all.push({ date: dateISO, open, high, low, close, volume });
@@ -208,10 +208,9 @@ function fetchTWSEStockDayMonths_(ticker, monthsBack) {
 function safeVolume_(arr) {
   const v1 = parseNum_(arr[1]);
   if (v1 > 0) return v1;
-  // fallback：有些格式可能把量放別處（保守處理）
   for (let i = 0; i < arr.length; i++) {
     const v = parseNum_(arr[i]);
-    if (v > 1000) return v; // 粗略：成交股數通常很大
+    if (v > 1000) return v;
   }
   return 0;
 }
@@ -223,7 +222,7 @@ function replaceRawForTicker_(rawSheet, ticker, rows) {
     const range = rawSheet.getRange(2, 1, lastRow - 1, 1).getValues(); // ticker col
     const toDelete = [];
     for (let i = 0; i < range.length; i++) {
-      if (String(range[i][0]).trim() === ticker) toDelete.push(i + 2); // sheet row
+      if (String(range[i][0]).trim() === ticker) toDelete.push(i + 2);
     }
     for (let i = toDelete.length - 1; i >= 0; i--) {
       rawSheet.deleteRow(toDelete[i]);
@@ -245,8 +244,9 @@ function calcSignalsFromRows_(rows) {
   const lows   = rows.map(r => r.low);
 
   // 今日均線（含今天收盤）
-  const ma10 = sma_(closes, MA10_N);
-  const ma20 = sma_(closes, MA20_N);
+  const ma10 = sma_(closes, TW_MA10_N);
+  const ma20 = sma_(closes, TW_MA20_N);
+  const ma60 = sma_(closes, TW_MA60_N);
 
   // 昨日均線（不含今天，用於 slope）
   const closesPrev = closes.slice(0, -1);
@@ -254,17 +254,18 @@ function calcSignalsFromRows_(rows) {
   const lowsPrev   = lows.slice(0, -1);
   const volsPrev   = vols.slice(0, -1);
 
-  const ma10_prev = sma_(closesPrev, MA10_N);
-  const ma20_prev = sma_(closesPrev, MA20_N);
+  const ma10_prev = sma_(closesPrev, TW_MA10_N);
+  const ma20_prev = sma_(closesPrev, TW_MA20_N);
+  const ma60_prev = sma_(closesPrev, TW_MA60_N);
 
-  // 量均：用「前 20 日均量」當基準（不含今天） → vol_ratio 才是今天量/過去均量
+  // 量均：用「前 20 日均量」當基準（不含今天）
   const vol_ma20 = sma_(volsPrev, VOL_MA_N);
   const vol_ratio = (isFiniteNum_(vol_ma20) && vol_ma20 > 0) ? (last.volume / vol_ma20) : '';
 
   // high40：顯示用（含今天）
   const high40 = Math.max(...highs.slice(Math.max(0, n - HIGH_N)));
 
-  // high40_prev：突破基準（不含今天，代表「昨天往回 40 天最高」）
+  // high40_prev：突破基準（不含今天）
   const nPrev = highsPrev.length;
   const high40_prev = (nPrev >= 1)
     ? Math.max(...highsPrev.slice(Math.max(0, nPrev - HIGH_N)))
@@ -274,7 +275,7 @@ function calcSignalsFromRows_(rows) {
   const rsi14 = rsiWilder_(closes, 14);
   const adx14 = adxWilder_(highs, lows, closes, 14);
 
-  // RSI / ADX（昨日，去掉最後一天）
+  // RSI / ADX（昨日）
   const rsi14_prev = rsiWilder_(closesPrev, 14);
   const adx14_prev = adxWilder_(highsPrev, lowsPrev, closesPrev, 14);
 
@@ -290,8 +291,10 @@ function calcSignalsFromRows_(rows) {
 
     ma10,
     ma20,
+    ma60,
     ma10_slope: (isFiniteNum_(ma10) && isFiniteNum_(ma10_prev)) ? (ma10 - ma10_prev) : '',
     ma20_slope: (isFiniteNum_(ma20) && isFiniteNum_(ma20_prev)) ? (ma20 - ma20_prev) : '',
+    ma60_slope: (isFiniteNum_(ma60) && isFiniteNum_(ma60_prev)) ? (ma60 - ma60_prev) : '',
 
     vol_ma20,
     vol_ratio,
@@ -311,7 +314,6 @@ function calcSignalsFromRows_(rows) {
 
 /** ===== Indicators ===== */
 
-/** Simple Moving Average */
 function sma_(arr, win) {
   if (!arr || arr.length < win) return '';
   let sum = 0;
@@ -319,7 +321,6 @@ function sma_(arr, win) {
   return sum / win;
 }
 
-/** RSI Wilder smoothing (latest) */
 function rsiWilder_(closes, period) {
   if (!closes || closes.length <= period) return '';
   let gains = 0, losses = 0;
@@ -346,7 +347,6 @@ function rsiWilder_(closes, period) {
   return 100 - (100 / (1 + rs));
 }
 
-/** ADX Wilder smoothing (latest) */
 function adxWilder_(highs, lows, closes, period) {
   const n = closes.length;
   if (!highs || !lows || !closes || n <= period + 1) return '';
@@ -368,7 +368,6 @@ function adxWilder_(highs, lows, closes, period) {
     tr.push(Math.max(tr1, tr2, tr3));
   }
 
-  // 初始和（period 筆）
   let smTR = 0, smPDM = 0, smNDM = 0;
   for (let i = 0; i < period; i++) {
     smTR += tr[i];
@@ -392,12 +391,10 @@ function adxWilder_(highs, lows, closes, period) {
 
   if (dxArr.length < period) return '';
 
-  // 初始 ADX：前 period 個 DX 平均
   let adx = 0;
   for (let i = 0; i < period; i++) adx += dxArr[i];
   adx = adx / period;
 
-  // Wilder smoothing
   for (let i = period; i < dxArr.length; i++) {
     adx = (adx * (period - 1) + dxArr[i]) / period;
   }
@@ -414,7 +411,6 @@ function parseNum_(s) {
 }
 
 function rocToISO_(roc) {
-  // "114/01/02" -> "2025-01-02"
   if (!roc) return '';
   const parts = String(roc).split('/');
   if (parts.length !== 3) return '';
