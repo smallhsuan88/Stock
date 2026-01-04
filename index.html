@@ -742,8 +742,13 @@ function renderMarketGate(){
       <li>週KD黃金交叉（週線）</li>
       <li>週MACD黃金交叉（週線）</li>
       <li>股價站上10週線兩週且10週線翻揚</li>
+      <li>價漲量增（相對上月：收盤上漲且月量增加）</li>
+      <li>月KD低檔（K、D均60以下）黃金交叉</li>
+      <li>確認連續2個月不破低（最近兩月 low 不再創更低）</li>
     </ol>
     <p class="notes-caption">bottom_lead_hits2：只列出 6~9 命中項目，用於中多資金上限 position_cap2 計算。</p>
+    <p class="notes-caption">bottom_lead_hits3：月線條件 10~12 的命中清單；position_cap3：當 10~12 三項皆符合時顯示 20%。</p>
+    <p class="notes-caption">移動停利/出場提示：跌破20日均 → SELL_HALF（賣一半）；跌破60日均 → SELL_ALL（全賣出）。此為靜態訊號提示，非保證成交或投資建議。</p>
   </div>
 </body>
 </html>

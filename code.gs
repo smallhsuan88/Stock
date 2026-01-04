@@ -54,10 +54,12 @@ const SIGNAL_HEADERS_WEEKLY = [
 const SIGNAL_HEADERS_MONTHLY = [
   'm_price_vol_up',
   'm_kd_low_golden',
-  'm_2m_no_break_low',
-  'mid_lead_hits_m',
-  'mid_lead_m_count',
-  'mid_position_cap'
+  'm_2m_no_lower_low',
+  'bottom_lead_hits3',
+  'bottom_lead3_count',
+  'position_cap3',
+  'exit_action',
+  'exit_note'
 ];
 
 /** 第一次用：補齊表頭（不會刪你資料，只會在空表時加表頭；若表不存在會自動建立） */
@@ -341,33 +343,55 @@ function calcSignalsFromRows_(rows) {
     const lastMonth = months[months.length - 1];
     const prevMonth = months[months.length - 2];
     const priceUp = lastMonth.close > prevMonth.close;
-    const volUp = lastMonth.volume > prevMonth.volume * 1.05;
+    const volUp = lastMonth.volume > prevMonth.volume * 1.05; // 可用 1.05 作為保護條件
     m_price_vol_up = (priceUp && volUp) ? 'TRUE' : 'FALSE';
   }
 
   const mkd = calcMonthlyKDLowGolden_(months, infoLogs);
   const m_kd_low_golden = mkd.status;
 
-  let m_2m_no_break_low = '';
+  let m_2m_no_lower_low = '';
   if (months.length >= 3) {
     const M = months[months.length - 1];
     const M1 = months[months.length - 2];
     const M2 = months[months.length - 3];
-    const condA = M.close >= M1.low;
-    const condB = M1.close >= M2.low;
-    m_2m_no_break_low = (condA && condB) ? 'TRUE' : 'FALSE';
+    const condA = M.low >= M1.low;
+    const condB = M1.low >= M2.low;
+    m_2m_no_lower_low = (condA && condB) ? 'TRUE' : 'FALSE';
   }
 
+  const m_2m_no_break_low = m_2m_no_lower_low;
+
   const midHits = [];
-  const monthlyStatuses = [m_price_vol_up, m_kd_low_golden, m_2m_no_break_low];
+  const monthlyStatuses = [m_price_vol_up, m_kd_low_golden, m_2m_no_lower_low];
   const monthlyAvailable = monthlyStatuses.some(s => s !== '');
   if (m_price_vol_up === 'TRUE') midHits.push('1');
   if (m_kd_low_golden === 'TRUE') midHits.push('2');
-  if (m_2m_no_break_low === 'TRUE') midHits.push('3');
+  if (m_2m_no_lower_low === 'TRUE') midHits.push('3');
 
   const mid_lead_hits_m = monthlyAvailable ? (midHits.length ? midHits.join(',') : '') : '';
   const mid_lead_m_count = monthlyAvailable ? String(midHits.length) : '';
   const mid_position_cap = (monthlyAvailable && midHits.length >= 3) ? '20%' : '';
+
+  const monthlyHits = [];
+  if (m_price_vol_up === 'TRUE') monthlyHits.push('10');
+  if (m_kd_low_golden === 'TRUE') monthlyHits.push('11');
+  if (m_2m_no_lower_low === 'TRUE') monthlyHits.push('12');
+
+  const bottom_lead_hits3 = monthlyAvailable ? (monthlyHits.length ? monthlyHits.join(',') : '') : '';
+  const bottom_lead3_count = monthlyAvailable ? String(monthlyHits.length) : '';
+  const position_cap3 = (monthlyAvailable && monthlyHits.length === 3) ? '20%' : '';
+
+  // 出場判斷
+  let exit_action = '';
+  let exit_note = '';
+  if (isFiniteNum_(ma60) && last.close < ma60) {
+    exit_action = 'SELL_ALL';
+    exit_note = '跌破60日均，全賣出';
+  } else if (isFiniteNum_(ma20) && last.close < ma20) {
+    exit_action = 'SELL_HALF';
+    exit_note = '跌破20日均，賣一半';
+  }
 
   // 底部領先訊號彙總
   const conds = [];
@@ -476,9 +500,15 @@ function calcSignalsFromRows_(rows) {
     m_price_vol_up,
     m_kd_low_golden,
     m_2m_no_break_low,
+    m_2m_no_lower_low,
     mid_lead_hits_m,
     mid_lead_m_count,
     mid_position_cap,
+    bottom_lead_hits3,
+    bottom_lead3_count,
+    position_cap3,
+    exit_action,
+    exit_note,
 
     infoLogs
   };
@@ -980,7 +1010,20 @@ function buildSignalRow_(header, calc, ticker) {
     ma10w: calc.ma10w,
     above_ma10w: calc.above_ma10w,
     wk_macd_golden: calc.wk_macd_golden,
-    wk_ma10w_2w_up: calc.wk_ma10w_2w_up
+    wk_ma10w_2w_up: calc.wk_ma10w_2w_up,
+
+    m_price_vol_up: calc.m_price_vol_up,
+    m_kd_low_golden: calc.m_kd_low_golden,
+    m_2m_no_break_low: calc.m_2m_no_break_low,
+    m_2m_no_lower_low: calc.m_2m_no_lower_low,
+    mid_lead_hits_m: calc.mid_lead_hits_m,
+    mid_lead_m_count: calc.mid_lead_m_count,
+    mid_position_cap: calc.mid_position_cap,
+    bottom_lead_hits3: calc.bottom_lead_hits3,
+    bottom_lead3_count: calc.bottom_lead3_count,
+    position_cap3: calc.position_cap3,
+    exit_action: calc.exit_action,
+    exit_note: calc.exit_note
   };
 
   return header.map(h => Object.prototype.hasOwnProperty.call(values, h) ? values[h] : '');
