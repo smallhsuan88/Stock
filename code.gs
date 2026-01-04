@@ -23,6 +23,31 @@ const NECKLINE_EPS = 0.005;
 
 const SLEEP_MS_EACH_TICKER = 250; // 避免被節流
 
+const SIGNAL_HEADERS_BASE = [
+  'market','ticker','date','close','volume',
+  'ma10','ma20','ma60','ma10_slope','ma20_slope','ma60_slope',
+  'vol_ma20','vol_ratio',
+  'rsi14','rsi14_prev',
+  'adx14','adx14_prev',
+  'high40','high40_prev',
+  'breakout',
+  'break_resline60',
+  'ma_bull_stack',
+  'wk_kd_golden',
+  'neckline60',
+  'break_neckline60',
+  'bottom_lead_hits',
+  'bottom_lead_count',
+  'position_cap'
+];
+
+const SIGNAL_HEADERS_WEEKLY = [
+  'ma10w',
+  'above_ma10w',
+  'wk_macd_golden',
+  'wk_ma10w_2w_up'
+];
+
 /** 第一次用：補齊表頭（不會刪你資料，只會在空表時加表頭；若表不存在會自動建立） */
 function initSheets_TW() {
   const ss = SpreadsheetApp.getActive();
@@ -35,23 +60,7 @@ function initSheets_TW() {
     raw.appendRow(['ticker','date','open','high','low','close','volume']);
   }
   if (sig.getLastRow() === 0) {
-    sig.appendRow([
-      'market','ticker','date','close','volume',
-      'ma10','ma20','ma60','ma10_slope','ma20_slope','ma60_slope',
-      'vol_ma20','vol_ratio',
-      'rsi14','rsi14_prev',
-      'adx14','adx14_prev',
-      'high40','high40_prev',
-      'breakout',
-      'break_resline60',
-      'ma_bull_stack',
-      'wk_kd_golden',
-      'neckline60',
-      'break_neckline60',
-      'bottom_lead_hits',
-      'bottom_lead_count',
-      'position_cap'
-    ]);
+    sig.appendRow(buildSignalHeaders_([]));
   }
   if (log.getLastRow() === 0) {
     log.appendRow(['time','level','ticker','message']);
@@ -73,24 +82,12 @@ function runTW_MVP() {
   }
 
   // 重新產出 Signals（MVP 穩）
+  const existingHeader = sig.getLastRow() > 0
+    ? sig.getRange(1, 1, 1, sig.getLastColumn()).getValues()[0].filter(v => String(v).trim() !== '')
+    : [];
+  const sigHeader = buildSignalHeaders_(existingHeader);
   sig.clearContents();
-  sig.appendRow([
-    'market','ticker','date','close','volume',
-    'ma10','ma20','ma60','ma10_slope','ma20_slope','ma60_slope',
-    'vol_ma20','vol_ratio',
-      'rsi14','rsi14_prev',
-      'adx14','adx14_prev',
-      'high40','high40_prev',
-      'breakout',
-      'break_resline60',
-      'ma_bull_stack',
-      'wk_kd_golden',
-      'neckline60',
-      'break_neckline60',
-      'bottom_lead_hits',
-      'bottom_lead_count',
-      'position_cap'
-    ]);
+  sig.appendRow(sigHeader);
 
   const started = new Date();
   log_(ss, 'INFO', '', `Run started. tickers=${tickers.length}, months=${LOOKBACK_MONTHS}`);
@@ -108,43 +105,7 @@ function runTW_MVP() {
 
       const calc = calcSignalsFromRows_(rows);
 
-      sig.appendRow([
-        'TW',
-        ticker,
-        calc.date,
-        calc.close,
-        calc.volume,
-
-        calc.ma10,
-        calc.ma20,
-        calc.ma60,
-        calc.ma10_slope,
-        calc.ma20_slope,
-        calc.ma60_slope,
-
-        calc.vol_ma20,
-        calc.vol_ratio,
-
-        calc.rsi14,
-        calc.rsi14_prev,
-
-        calc.adx14,
-        calc.adx14_prev,
-
-        calc.high40,
-        calc.high40_prev,
-
-        calc.breakout,
-
-        calc.break_resline60,
-        calc.ma_bull_stack,
-        calc.wk_kd_golden,
-        calc.neckline60,
-        calc.break_neckline60,
-        calc.bottom_lead_hits,
-        calc.bottom_lead_count,
-        calc.position_cap
-      ]);
+      sig.appendRow(buildSignalRow_(sigHeader, calc, ticker));
 
       log_(ss, 'INFO', ticker,
         `OK ${calc.date} breakout=${calc.breakout} ` +
@@ -331,9 +292,34 @@ function calcSignalsFromRows_(rows) {
   const neckline60 = neckline.neckline;
   const break_neckline60 = neckline.breakStatus;
 
+  const weeks = toWeeklyBars_(rows);
+  const wCloses = weeks.map(w => w.close);
+
   // 週 KD 金叉
-  const kd = calcWeeklyKDG_(rows, infoLogs);
+  const kd = calcWeeklyKDG_(weeks, infoLogs);
   const wk_kd_golden = kd.status;
+
+  // 週 MA10
+  let ma10w = '';
+  let ma10w_prev = '';
+  if (wCloses.length >= 10) {
+    ma10w = sma_(wCloses, 10);
+    ma10w_prev = wCloses.length >= 11 ? sma_(wCloses.slice(0, -1), 10) : '';
+  }
+
+  const above_ma10w = (isFiniteNum_(ma10w) && weeks.length)
+    ? (weeks[weeks.length - 1].close > ma10w ? 'TRUE' : 'FALSE')
+    : '';
+
+  let wk_ma10w_2w_up = '';
+  if (isFiniteNum_(ma10w) && isFiniteNum_(ma10w_prev) && weeks.length >= 2) {
+    const lastWeekClose = weeks[weeks.length - 1].close;
+    const prevWeekClose = weeks[weeks.length - 2].close;
+    wk_ma10w_2w_up = (lastWeekClose > ma10w && prevWeekClose > ma10w_prev) ? 'TRUE' : 'FALSE';
+  }
+
+  const macd = calcWeeklyMacd_(wCloses, infoLogs);
+  const wk_macd_golden = macd.status;
 
   // 底部領先訊號彙總
   const conds = [];
@@ -408,6 +394,11 @@ function calcSignalsFromRows_(rows) {
     bottom_lead_hits,
     bottom_lead_count,
     position_cap,
+
+    ma10w,
+    above_ma10w,
+    wk_macd_golden,
+    wk_ma10w_2w_up,
 
     infoLogs
   };
@@ -503,6 +494,54 @@ function adxWilder_(highs, lows, closes, period) {
   return adx;
 }
 
+function calcMacdSeries_(closes, fast, slow, signal) {
+  const n = closes.length;
+  const macdLine = new Array(n).fill('');
+  const signalLine = new Array(n).fill('');
+  if (!closes || n < slow) return { macdLine, signalLine };
+
+  const kFast = 2 / (fast + 1);
+  const kSlow = 2 / (slow + 1);
+  const kSignal = 2 / (signal + 1);
+
+  let emaFast = null;
+  let emaSlow = null;
+  let signalEma = null;
+  const macdHistory = [];
+
+  for (let i = 0; i < n; i++) {
+    const price = closes[i];
+
+    if (i === fast - 1) {
+      emaFast = average_(closes.slice(0, fast));
+    } else if (i >= fast && emaFast !== null) {
+      emaFast = price * kFast + emaFast * (1 - kFast);
+    }
+
+    if (i === slow - 1) {
+      emaSlow = average_(closes.slice(0, slow));
+    } else if (i >= slow && emaSlow !== null) {
+      emaSlow = price * kSlow + emaSlow * (1 - kSlow);
+    }
+
+    if (emaFast !== null && emaSlow !== null) {
+      const macd = emaFast - emaSlow;
+      macdLine[i] = macd;
+      macdHistory.push(macd);
+
+      if (macdHistory.length === signal) {
+        signalEma = average_(macdHistory.slice(macdHistory.length - signal));
+      } else if (macdHistory.length > signal && signalEma !== null) {
+        signalEma = macd * kSignal + signalEma * (1 - kSignal);
+      }
+
+      if (signalEma !== null) signalLine[i] = signalEma;
+    }
+  }
+
+  return { macdLine, signalLine };
+}
+
 function calcBreakResline60_(highs, lastClose, n, infoLogs) {
   if (n < TW_MA60_N) {
     infoLogs.push('break_resline60 skipped: need >= 60 days');
@@ -588,9 +627,8 @@ function calcNeckline60_(closes, lastClose, n, infoLogs) {
   };
 }
 
-function calcWeeklyKDG_(rows, infoLogs) {
-  if (!rows || rows.length === 0) return { status: '', available: false, hit: false };
-
+function toWeeklyBars_(rows) {
+  if (!rows || !rows.length) return [];
   const weeks = [];
   rows.forEach(r => {
     const key = weekKey_(r.date);
@@ -609,6 +647,11 @@ function calcWeeklyKDG_(rows, infoLogs) {
       w.close = r.close;
     }
   });
+  return weeks;
+}
+
+function calcWeeklyKDG_(weeks, infoLogs) {
+  if (!weeks || weeks.length === 0) return { status: '', available: false, hit: false };
 
   if (weeks.length < 12) {
     infoLogs.push(`wk_kd_golden skipped: weeks < 12 (have ${weeks.length})`);
@@ -648,6 +691,29 @@ function calcWeeklyKDG_(rows, infoLogs) {
   return { status: golden ? 'TRUE' : 'FALSE', available: true, hit: golden };
 }
 
+function calcWeeklyMacd_(wCloses, infoLogs) {
+  if (!wCloses || wCloses.length === 0) return { status: '', available: false, hit: false };
+  if (wCloses.length < 35) {
+    infoLogs.push(`wk_macd_golden skipped: weeks < 35 (have ${wCloses.length})`);
+    return { status: '', available: false, hit: false };
+  }
+
+  const { macdLine, signalLine } = calcMacdSeries_(wCloses, 12, 26, 9);
+  const lastIdx = findPrevFinitePairIndex_(macdLine, signalLine, macdLine.length);
+  if (lastIdx < 0) {
+    infoLogs.push('wk_macd_golden skipped: macd/signal unavailable');
+    return { status: '', available: false, hit: false };
+  }
+  const prevIdx = findPrevFinitePairIndex_(macdLine, signalLine, lastIdx);
+  if (prevIdx < 0) {
+    infoLogs.push('wk_macd_golden skipped: prev macd/signal unavailable');
+    return { status: '', available: false, hit: false };
+  }
+
+  const hit = macdLine[lastIdx] > signalLine[lastIdx] && macdLine[prevIdx] <= signalLine[prevIdx];
+  return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
+}
+
 function weekKey_(dateStr) {
   const dt = new Date(`${dateStr}T00:00:00+08:00`);
   const day = dt.getDay(); // 0=Sun
@@ -681,6 +747,91 @@ function isFiniteNum_(x) {
 function num_(x, dp) {
   if (!isFiniteNum_(x)) return '';
   return x.toFixed(dp);
+}
+
+function average_(arr) {
+  if (!arr || !arr.length) return null;
+  const sum = arr.reduce((s, v) => s + (Number(v) || 0), 0);
+  return sum / arr.length;
+}
+
+function findPrevFinitePairIndex_(arr1, arr2, startIdx) {
+  for (let i = Math.min(startIdx - 1, arr1.length - 1); i >= 0; i--) {
+    if (isFiniteNum_(arr1[i]) && isFiniteNum_(arr2[i])) return i;
+  }
+  return -1;
+}
+
+function buildSignalHeaders_(existingHeader) {
+  const headerSet = new Set();
+  const finalHeaders = [];
+
+  (existingHeader || []).forEach(h => {
+    const name = String(h || '').trim();
+    if (!name) return;
+    if (headerSet.has(name)) return;
+    headerSet.add(name);
+    finalHeaders.push(name);
+  });
+
+  const addField = (field) => {
+    if (!headerSet.has(field)) {
+      headerSet.add(field);
+      finalHeaders.push(field);
+    }
+  };
+
+  SIGNAL_HEADERS_BASE.forEach(addField);
+  SIGNAL_HEADERS_WEEKLY.forEach(addField);
+
+  return finalHeaders;
+}
+
+function buildSignalRow_(header, calc, ticker) {
+  const values = {
+    market: 'TW',
+    ticker,
+    date: calc.date,
+    close: calc.close,
+    volume: calc.volume,
+
+    ma10: calc.ma10,
+    ma20: calc.ma20,
+    ma60: calc.ma60,
+    ma10_slope: calc.ma10_slope,
+    ma20_slope: calc.ma20_slope,
+    ma60_slope: calc.ma60_slope,
+
+    vol_ma20: calc.vol_ma20,
+    vol_ratio: calc.vol_ratio,
+
+    rsi14: calc.rsi14,
+    rsi14_prev: calc.rsi14_prev,
+
+    adx14: calc.adx14,
+    adx14_prev: calc.adx14_prev,
+
+    high40: calc.high40,
+    high40_prev: calc.high40_prev,
+
+    breakout: calc.breakout,
+
+    break_resline60: calc.break_resline60,
+    ma_bull_stack: calc.ma_bull_stack,
+    wk_kd_golden: calc.wk_kd_golden,
+    neckline60: calc.neckline60,
+    break_neckline60: calc.break_neckline60,
+    bottom_lead_hits: calc.bottom_lead_hits,
+    bottom_lead_count: calc.bottom_lead_count,
+    position_cap: calc.position_cap,
+
+    ma10w: calc.ma10w,
+    above_ma10w: calc.above_ma10w,
+    wk_macd_golden: calc.wk_macd_golden,
+    wk_ma10w_2w_up: calc.wk_ma10w_2w_up
+  };
+
+  return header.map(h => Object.prototype.hasOwnProperty.call(values, h) ? values[h] : '');
 }
 
 function log_(ss, level, ticker, message) {
