@@ -11,7 +11,7 @@ const SHEET_RAW     = 'Raw_TW';
 const SHEET_SIGNALS = 'Signals_TW';
 const SHEET_LOG     = 'Log';
 
-const LOOKBACK_MONTHS = 6;   // 若要 MA60 覆蓋率更高，可改 9 或 12
+const LOOKBACK_MONTHS = 18;   // 若要 MA60 覆蓋率更高，可改 9 或 12
 const HIGH_N   = 40;
 const VOL_MA_N = 20;
 const TW_MA10_N   = 10;
