@@ -37,8 +37,11 @@ const SIGNAL_HEADERS_BASE = [
   'neckline60',
   'break_neckline60',
   'bottom_lead_hits',
+  'bottom_lead_hits2',
   'bottom_lead_count',
-  'position_cap'
+  'bottom_lead2_count',
+  'position_cap',
+  'position_cap2'
 ];
 
 const SIGNAL_HEADERS_WEEKLY = [
@@ -323,41 +326,63 @@ function calcSignalsFromRows_(rows) {
 
   // 底部領先訊號彙總
   const conds = [];
-  const hits = [];
+  const hits1to5 = [];
 
   if (resline.available) {
     conds.push(resline.hit);
-    if (resline.hit) hits.push('1');
+    if (resline.hit) hits1to5.push('1');
   }
   if (ma_bull_stack !== '') {
     conds.push(ma_bull_stack === 'TRUE');
-    if (ma_bull_stack === 'TRUE') hits.push('2');
+    if (ma_bull_stack === 'TRUE') hits1to5.push('2');
   }
   if (kd.available) {
     conds.push(kd.hit);
-    if (kd.hit) hits.push('3');
+    if (kd.hit) hits1to5.push('3');
   }
   if (neckline.available) {
     conds.push(neckline.hit);
-    if (neckline.hit) hits.push('4');
+    if (neckline.hit) hits1to5.push('4');
   }
   const cond5Available = isFiniteNum_(ma60);
   if (cond5Available) {
     const cond5 = last.close > ma60;
     conds.push(cond5);
-    if (cond5) hits.push('5');
+    if (cond5) hits1to5.push('5');
   } else {
     infoLogs.push('ma60 unavailable for cond5 (need >= 60 closes)');
   }
 
-  const anyCondAvailable = conds.length > 0;
-  const bottom_lead_hits = hits.length > 0 ? hits.join(',') : '';
-  const bottom_lead_count = anyCondAvailable ? String(hits.length) : '';
+  const weeklyHits = [];
+  const weeklyAvailability = [];
+  const pushWeekly = (flag, label) => {
+    if (flag === 'TRUE') weeklyHits.push(label);
+    if (flag === 'TRUE' || flag === 'FALSE') weeklyAvailability.push(true);
+  };
+  pushWeekly(above_ma10w, '6');
+  pushWeekly(wk_kd_golden, '7');
+  pushWeekly(wk_macd_golden, '8');
+  pushWeekly(wk_ma10w_2w_up, '9');
+
+  const hasWeeklyAvailability = weeklyAvailability.length > 0;
+  const bottom_lead_hits2 = hasWeeklyAvailability ? (weeklyHits.length ? weeklyHits.join(',') : '') : '';
+  const bottom_lead2_count = hasWeeklyAvailability ? String(weeklyHits.length) : '';
+
+  const allHits = hits1to5.concat(weeklyHits);
+  const anyCondAvailable = conds.length > 0 || hasWeeklyAvailability;
+  const bottom_lead_hits = allHits.length > 0 ? allHits.join(',') : '';
+  const bottom_lead_count = anyCondAvailable ? String(allHits.length) : '';
 
   let position_cap = '';
-  if (anyCondAvailable) {
-    if (hits.length >= 5) position_cap = '40%';
-    else if (hits.length >= 3) position_cap = '20%';
+  if (conds.length > 0) {
+    if (hits1to5.length >= 5) position_cap = '40%';
+    else if (hits1to5.length >= 3) position_cap = '20%';
+  }
+
+  let position_cap2 = '';
+  if (hasWeeklyAvailability) {
+    if (weeklyHits.length >= 4) position_cap2 = '40%';
+    else if (weeklyHits.length >= 2) position_cap2 = '20%';
   }
 
   return {
@@ -393,7 +418,10 @@ function calcSignalsFromRows_(rows) {
     break_neckline60,
     bottom_lead_hits,
     bottom_lead_count,
+    bottom_lead_hits2,
+    bottom_lead2_count,
     position_cap,
+    position_cap2,
 
     ma10w,
     above_ma10w,
@@ -823,7 +851,10 @@ function buildSignalRow_(header, calc, ticker) {
     break_neckline60: calc.break_neckline60,
     bottom_lead_hits: calc.bottom_lead_hits,
     bottom_lead_count: calc.bottom_lead_count,
+    bottom_lead_hits2: calc.bottom_lead_hits2,
+    bottom_lead2_count: calc.bottom_lead2_count,
     position_cap: calc.position_cap,
+    position_cap2: calc.position_cap2,
 
     ma10w: calc.ma10w,
     above_ma10w: calc.above_ma10w,
