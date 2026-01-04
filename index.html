@@ -133,6 +133,8 @@ const DECISION_HEADERS = [
   "reason"
 ];
 
+const PRIORITY_AFTER_VOLUME = ["bottom_lead_hits","position_cap"];
+
 // ✅ 新增：空頭環境才會顯示的欄位
 const BEAR_HEADERS = [
   "ma60",
@@ -140,7 +142,51 @@ const BEAR_HEADERS = [
 ];
 
 function parseCSV(text) {
-  return text.trim().split("\n").map(line => line.split(","));
+  const rows = [];
+  let row = [];
+  let cur = "";
+  let inQuotes = false;
+
+  const s = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  for (let i = 0; i < s.length; i++){
+    const ch = s[i];
+
+    if (inQuotes){
+      if (ch === '"'){
+        const next = s[i+1];
+        if (next === '"'){ // escaped quote
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else {
+      if (ch === '"'){
+        inQuotes = true;
+      } else if (ch === ","){
+        row.push(cur);
+        cur = "";
+      } else if (ch === "\n"){
+        row.push(cur);
+        cur = "";
+        // 避免最後多一個空列
+        if (row.length > 1 || (row.length === 1 && row[0].trim() !== "")) rows.push(row);
+        row = [];
+      } else {
+        cur += ch;
+      }
+    }
+  }
+
+  // flush last
+  row.push(cur);
+  if (row.length > 1 || (row.length === 1 && row[0].trim() !== "")) rows.push(row);
+
+  return rows;
 }
 
 function isHTMLResponse(text){
@@ -401,18 +447,27 @@ function decorateRows(){
 function getDisplayHeaders(){
   const volIdx = baseHeaders.indexOf("volume");
   const beforeVolume = volIdx >= 0 ? baseHeaders.slice(0, volIdx + 1) : baseHeaders.slice();
-  const afterVolume = volIdx >= 0 ? baseHeaders.slice(volIdx + 1) : [];
+  const afterVolume  = volIdx >= 0 ? baseHeaders.slice(volIdx + 1) : [];
 
-  const visible = beforeVolume.concat(DECISION_HEADERS);
+  // 1) 先把 volume 後要優先顯示的欄位放上來（但要確保存在於 headers）
+  const priority = PRIORITY_AFTER_VOLUME.filter(h => baseHeaders.includes(h) || headers.includes(h));
+
+  // 2) 決策欄（你原本的）
+  let visibleCore = beforeVolume.concat(priority, DECISION_HEADERS);
 
   // ✅ 只有 Market Gate = 空頭環境才插入 ma60 + bear_sell_plan
   const regime = getMarketRegime();
   if (regime.regime === "BEAR") {
-    visible.push(...BEAR_HEADERS);
+    visibleCore = visibleCore.concat(BEAR_HEADERS);
   }
 
-  if (showTechnicalData) visible.push(...afterVolume);
-  return visible;
+  // 3) 技術欄：把已經放進 visibleCore 的移除掉，避免重複
+  if (showTechnicalData){
+    const coreSet = new Set(visibleCore);
+    const techOnly = afterVolume.filter(h => !coreSet.has(h));
+    return visibleCore.concat(techOnly);
+  }
+  return visibleCore;
 }
 
 function toVal(x){
