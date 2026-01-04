@@ -57,6 +57,28 @@
     .bear-sell-badge--na { border-color:#ddd; background:#f7f7f7; color:#666; }
 
     .controls { margin-bottom: 10px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+
+    .header-subnote {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      color: #666;
+      font-weight: 500;
+      white-space: normal;
+      line-height: 1.25;
+    }
+
+    .bottom-lead-notes {
+      margin-top: 18px;
+      border: 1px solid #e0e0e0;
+      border-radius: 10px;
+      background: #fbfbfb;
+      padding: 12px 14px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    .bottom-lead-notes h3 { margin: 0 0 8px; font-size: 15px; }
+    .bottom-lead-notes ol { margin: 6px 0 0 20px; color: #444; }
+    .bottom-lead-notes li { margin: 6px 0; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -513,6 +535,14 @@ function render(){
   displayHeaders.forEach(h => {
     const th = document.createElement("th");
     th.textContent = h;
+
+    if (h === "position_cap") {
+      const note = document.createElement("span");
+      note.className = "header-subnote";
+      note.textContent = "防呆：進場後跌破 20MA 且 3 日站不回則視為假突破，暫停/停損。";
+      th.appendChild(note);
+    }
+
     const headerIdx = idx(h);
     th.onclick = () => { sortKey = headerIdx; sortAsc = !sortAsc; sortRows(); render(); };
     trh.appendChild(th);
@@ -689,5 +719,16 @@ function renderMarketGate(){
 })();
 
 </script>
+
+  <div class="bottom-lead-notes">
+    <h3>📌 bottom_lead_hits 說明</h3>
+    <ol>
+      <li>突破60日壓力</li>
+      <li>股價站上 MA10、MA20，且 MA10 大於 MA20</li>
+      <li>週KD黃金交叉</li>
+      <li>股價突破頸線</li>
+      <li>股價大於 MA60</li>
+    </ol>
+  </div>
 </body>
 </html>
