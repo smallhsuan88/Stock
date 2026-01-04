@@ -155,7 +155,12 @@ const DECISION_HEADERS = [
   "reason"
 ];
 
-const PRIORITY_AFTER_VOLUME = ["bottom_lead_hits","position_cap"];
+const PRIORITY_AFTER_VOLUME = [
+  "bottom_lead_hits",
+  "bottom_lead_hits2",
+  "position_cap",
+  "position_cap2"
+];
 
 // ✅ 新增：空頭環境才會顯示的欄位
 const BEAR_HEADERS = [
@@ -541,6 +546,11 @@ function render(){
       note.className = "header-subnote";
       note.textContent = "防呆：進場後跌破 20MA 且 3 日站不回則視為假突破，暫停/停損。";
       th.appendChild(note);
+    } else if (h === "position_cap2") {
+      const note = document.createElement("span");
+      note.className = "header-subnote";
+      note.textContent = "連續 2 週跌破 10 週均線停止加碼，轉為防守觀察。";
+      th.appendChild(note);
     }
 
     const headerIdx = idx(h);
@@ -728,7 +738,12 @@ function renderMarketGate(){
       <li>週KD黃金交叉</li>
       <li>股價突破頸線</li>
       <li>股價大於 MA60</li>
+      <li>股價站上 10 週均線</li>
+      <li>週KD黃金交叉（週線）</li>
+      <li>週MACD黃金交叉（週線）</li>
+      <li>股價站上10週線兩週且10週線翻揚</li>
     </ol>
+    <p class="notes-caption">bottom_lead_hits2：只列出 6~9 命中項目，用於中多資金上限 position_cap2 計算。</p>
   </div>
 </body>
 </html>
