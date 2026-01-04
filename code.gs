@@ -442,6 +442,20 @@ function calcSignalsFromRows_(rows) {
   const bottom_lead_hits = allHits.length > 0 ? allHits.join(',') : '';
   const bottom_lead_count = anyCondAvailable ? String(allHits.length) : '';
 
+  const mergedSet = new Set();
+  const mergeHits = (src) => {
+    if (!src) return;
+    String(src).split(',').map(s => s.trim()).filter(Boolean).forEach(v => mergedSet.add(v));
+  };
+  mergeHits(bottom_lead_hits);
+  mergeHits(bottom_lead_hits2);
+  mergeHits(bottom_lead_hits3);
+
+  const mergedHits = Array.from(mergedSet).filter(Boolean).sort((a, b) => Number(a) - Number(b));
+  const mergedBottomLeadHits = mergedHits.length ? mergedHits.join(',') : '';
+
+  const bottom_lead_hits_final = mergedBottomLeadHits;
+
   let position_cap = '';
   if (conds.length > 0) {
     if (hits1to5.length >= 5) position_cap = '40%';
@@ -485,7 +499,7 @@ function calcSignalsFromRows_(rows) {
     wk_kd_golden,
     neckline60,
     break_neckline60,
-    bottom_lead_hits,
+    bottom_lead_hits: bottom_lead_hits_final,
     bottom_lead_count,
     bottom_lead_hits2,
     bottom_lead2_count,
@@ -962,6 +976,25 @@ function buildSignalHeaders_(existingHeader) {
   SIGNAL_HEADERS_BASE.forEach(addField);
   SIGNAL_HEADERS_WEEKLY.forEach(addField);
   SIGNAL_HEADERS_MONTHLY.forEach(addField);
+
+  const placeAfter = (field, afterField) => {
+    if (!headerSet.has(afterField)) return;
+    if (!headerSet.has(field)) {
+      headerSet.add(field);
+      finalHeaders.push(field);
+    }
+    const currentIdx = finalHeaders.indexOf(field);
+    if (currentIdx === -1) return;
+    const afterIdx = finalHeaders.indexOf(afterField);
+    if (afterIdx === -1) return;
+    if (currentIdx === afterIdx + 1) return;
+    finalHeaders.splice(currentIdx, 1);
+    finalHeaders.splice(afterIdx + 1, 0, field);
+  };
+
+  placeAfter('position_cap3', 'position_cap2');
+  placeAfter('exit_action', 'position_cap3');
+  placeAfter('exit_note', 'exit_action');
 
   return finalHeaders;
 }
