@@ -17,6 +17,9 @@ const VOL_MA_N = 20;
 const TW_MA10_N   = 10;
 const TW_MA20_N   = 20;
 const TW_MA60_N   = 60;
+const RESLINE_EPS = 0.005;
+const NECKLINE_TOLERANCE = 0.005;
+const NECKLINE_EPS = 0.005;
 
 const SLEEP_MS_EACH_TICKER = 250; // 避免被節流
 
@@ -39,7 +42,15 @@ function initSheets_TW() {
       'rsi14','rsi14_prev',
       'adx14','adx14_prev',
       'high40','high40_prev',
-      'breakout'
+      'breakout',
+      'break_resline60',
+      'ma_bull_stack',
+      'wk_kd_golden',
+      'neckline60',
+      'break_neckline60',
+      'bottom_lead_hits',
+      'bottom_lead_count',
+      'position_cap'
     ]);
   }
   if (log.getLastRow() === 0) {
@@ -67,11 +78,19 @@ function runTW_MVP() {
     'market','ticker','date','close','volume',
     'ma10','ma20','ma60','ma10_slope','ma20_slope','ma60_slope',
     'vol_ma20','vol_ratio',
-    'rsi14','rsi14_prev',
-    'adx14','adx14_prev',
-    'high40','high40_prev',
-    'breakout'
-  ]);
+      'rsi14','rsi14_prev',
+      'adx14','adx14_prev',
+      'high40','high40_prev',
+      'breakout',
+      'break_resline60',
+      'ma_bull_stack',
+      'wk_kd_golden',
+      'neckline60',
+      'break_neckline60',
+      'bottom_lead_hits',
+      'bottom_lead_count',
+      'position_cap'
+    ]);
 
   const started = new Date();
   log_(ss, 'INFO', '', `Run started. tickers=${tickers.length}, months=${LOOKBACK_MONTHS}`);
@@ -115,13 +134,25 @@ function runTW_MVP() {
         calc.high40,
         calc.high40_prev,
 
-        calc.breakout
+        calc.breakout,
+
+        calc.break_resline60,
+        calc.ma_bull_stack,
+        calc.wk_kd_golden,
+        calc.neckline60,
+        calc.break_neckline60,
+        calc.bottom_lead_hits,
+        calc.bottom_lead_count,
+        calc.position_cap
       ]);
 
       log_(ss, 'INFO', ticker,
         `OK ${calc.date} breakout=${calc.breakout} ` +
         `vol_ratio=${num_(calc.vol_ratio,2)} rsi=${num_(calc.rsi14,1)} adx=${num_(calc.adx14,1)}`
       );
+      if (calc.infoLogs && calc.infoLogs.length) {
+        calc.infoLogs.forEach(msg => log_(ss, 'INFO', ticker, msg));
+      }
     } catch (e) {
       log_(ss, 'ERROR', ticker, String(e && e.stack ? e.stack : e));
     } finally {
@@ -237,6 +268,7 @@ function replaceRawForTicker_(rawSheet, ticker, rows) {
 function calcSignalsFromRows_(rows) {
   const n = rows.length;
   const last = rows[n - 1];
+  const infoLogs = [];
 
   const closes = rows.map(r => r.close);
   const vols   = rows.map(r => r.volume);
@@ -284,6 +316,64 @@ function calcSignalsFromRows_(rows) {
     (isFiniteNum_(high40_prev) ? (last.close > high40_prev) : false) &&
     (isFiniteNum_(vol_ma20) ? (last.volume > vol_ma20) : false);
 
+  // ma_bull_stack：close > ma10 > ma20 且 close > ma20
+  let ma_bull_stack = '';
+  if (isFiniteNum_(ma10) && isFiniteNum_(ma20)) {
+    ma_bull_stack = (last.close > ma10 && last.close > ma20 && ma10 > ma20) ? 'TRUE' : 'FALSE';
+  }
+
+  // break_resline60：Swing High 壓力線突破
+  const resline = calcBreakResline60_(highs, last.close, n, infoLogs);
+  const break_resline60 = resline.status;
+
+  // neckline60 / break_neckline60：近 60 日最多碰觸價位 + 突破
+  const neckline = calcNeckline60_(closes, last.close, n, infoLogs);
+  const neckline60 = neckline.neckline;
+  const break_neckline60 = neckline.breakStatus;
+
+  // 週 KD 金叉
+  const kd = calcWeeklyKDG_(rows, infoLogs);
+  const wk_kd_golden = kd.status;
+
+  // 底部領先訊號彙總
+  const conds = [];
+  const hits = [];
+
+  if (resline.available) {
+    conds.push(resline.hit);
+    if (resline.hit) hits.push('1');
+  }
+  if (ma_bull_stack !== '') {
+    conds.push(ma_bull_stack === 'TRUE');
+    if (ma_bull_stack === 'TRUE') hits.push('2');
+  }
+  if (kd.available) {
+    conds.push(kd.hit);
+    if (kd.hit) hits.push('3');
+  }
+  if (neckline.available) {
+    conds.push(neckline.hit);
+    if (neckline.hit) hits.push('4');
+  }
+  const cond5Available = isFiniteNum_(ma60);
+  if (cond5Available) {
+    const cond5 = last.close > ma60;
+    conds.push(cond5);
+    if (cond5) hits.push('5');
+  } else {
+    infoLogs.push('ma60 unavailable for cond5 (need >= 60 closes)');
+  }
+
+  const anyCondAvailable = conds.length > 0;
+  const bottom_lead_hits = hits.length > 0 ? hits.join(',') : '';
+  const bottom_lead_count = anyCondAvailable ? String(hits.length) : '';
+
+  let position_cap = '';
+  if (anyCondAvailable) {
+    if (hits.length >= 5) position_cap = '40%';
+    else if (hits.length >= 3) position_cap = '20%';
+  }
+
   return {
     date: last.date,
     close: last.close,
@@ -308,7 +398,18 @@ function calcSignalsFromRows_(rows) {
     high40,
     high40_prev,
 
-    breakout
+    breakout,
+
+    break_resline60,
+    ma_bull_stack,
+    wk_kd_golden,
+    neckline60,
+    break_neckline60,
+    bottom_lead_hits,
+    bottom_lead_count,
+    position_cap,
+
+    infoLogs
   };
 }
 
@@ -400,6 +501,159 @@ function adxWilder_(highs, lows, closes, period) {
   }
 
   return adx;
+}
+
+function calcBreakResline60_(highs, lastClose, n, infoLogs) {
+  if (n < TW_MA60_N) {
+    infoLogs.push('break_resline60 skipped: need >= 60 days');
+    return { status: '', available: false, hit: false };
+  }
+
+  const start = Math.max(0, n - TW_MA60_N);
+  const end = n - 1; // 不含今天
+  const swingIdx = [];
+  for (let i = start + 1; i < end; i++) {
+    if (i + 1 >= highs.length) break;
+    const hi = highs[i];
+    if (hi > highs[i - 1] && hi > highs[i + 1]) {
+      swingIdx.push(i);
+    }
+  }
+
+  if (swingIdx.length < 2) {
+    infoLogs.push('break_resline60 skipped: swing highs < 2 in last 60 days');
+    return { status: '', available: false, hit: false };
+  }
+
+  const t2 = swingIdx[swingIdx.length - 1];
+  const t1 = swingIdx[swingIdx.length - 2];
+  const p2 = highs[t2];
+  const p1 = highs[t1];
+
+  if (t2 === t1) {
+    infoLogs.push('break_resline60 skipped: swing high indices identical');
+    return { status: '', available: false, hit: false };
+  }
+
+  const tNow = n - 1;
+  const y = p1 + (p2 - p1) * (tNow - t1) / (t2 - t1);
+  const hit = lastClose > y * (1 + RESLINE_EPS);
+  return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
+}
+
+function calcNeckline60_(closes, lastClose, n, infoLogs) {
+  if (n < TW_MA60_N) {
+    infoLogs.push('neckline60 skipped: need >= 60 days');
+    return { neckline: '', breakStatus: '', available: false, hit: false };
+  }
+  const start = Math.max(0, n - TW_MA60_N);
+  const prices = closes.slice(start, n - 1); // 建議不含今天
+
+  const clusters = [];
+  prices.forEach(price => {
+    if (!isFiniteNum_(price) || price <= 0) return;
+    let matched = false;
+    for (const c of clusters) {
+      if (Math.abs(price - c.center) / c.center <= NECKLINE_TOLERANCE) {
+        c.count += 1;
+        c.sum += price;
+        c.center = c.sum / c.count;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      clusters.push({ center: price, count: 1, sum: price });
+    }
+  });
+
+  if (!clusters.length) {
+    infoLogs.push('neckline60 skipped: clusters not formed');
+    return { neckline: '', breakStatus: '', available: false, hit: false };
+  }
+
+  let best = clusters[0];
+  for (let i = 1; i < clusters.length; i++) {
+    if (clusters[i].count > best.count) best = clusters[i];
+  }
+
+  const neckline = best.center;
+  const hit = lastClose > neckline * (1 + NECKLINE_EPS);
+
+  return {
+    neckline,
+    breakStatus: hit ? 'TRUE' : 'FALSE',
+    available: true,
+    hit
+  };
+}
+
+function calcWeeklyKDG_(rows, infoLogs) {
+  if (!rows || rows.length === 0) return { status: '', available: false, hit: false };
+
+  const weeks = [];
+  rows.forEach(r => {
+    const key = weekKey_(r.date);
+    if (!weeks.length || weeks[weeks.length - 1].key !== key) {
+      weeks.push({
+        key,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close
+      });
+    } else {
+      const w = weeks[weeks.length - 1];
+      w.high = Math.max(w.high, r.high);
+      w.low = Math.min(w.low, r.low);
+      w.close = r.close;
+    }
+  });
+
+  if (weeks.length < 12) {
+    infoLogs.push(`wk_kd_golden skipped: weeks < 12 (have ${weeks.length})`);
+    return { status: '', available: false, hit: false };
+  }
+
+  let K = 50;
+  let D = 50;
+  let prevK = null;
+  let prevD = null;
+
+  for (let i = 0; i < weeks.length; i++) {
+    if (i < 8) continue; // 9 週才開始 RSV
+    const window = weeks.slice(Math.max(0, i - 8), i + 1);
+    const highs = window.map(w => w.high);
+    const lows = window.map(w => w.low);
+    const close = weeks[i].close;
+
+    const highestHigh = Math.max(...highs);
+    const lowestLow = Math.min(...lows);
+    if (highestHigh === lowestLow) continue;
+    const RSV = (close - lowestLow) / (highestHigh - lowestLow) * 100;
+    K = (2 / 3) * K + (1 / 3) * RSV;
+    D = (2 / 3) * D + (1 / 3) * K;
+
+    if (i === weeks.length - 1) break;
+    prevK = K;
+    prevD = D;
+  }
+
+  if (prevK === null || prevD === null) {
+    infoLogs.push('wk_kd_golden skipped: insufficient RSV history');
+    return { status: '', available: false, hit: false };
+  }
+
+  const golden = (K > D) && (prevK <= prevD);
+  return { status: golden ? 'TRUE' : 'FALSE', available: true, hit: golden };
+}
+
+function weekKey_(dateStr) {
+  const dt = new Date(`${dateStr}T00:00:00+08:00`);
+  const day = dt.getDay(); // 0=Sun
+  const diff = (day + 6) % 7; // Monday as start
+  dt.setDate(dt.getDate() - diff);
+  return Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
 
 /** ===== Utils ===== */
