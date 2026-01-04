@@ -51,6 +51,15 @@ const SIGNAL_HEADERS_WEEKLY = [
   'wk_ma10w_2w_up'
 ];
 
+const SIGNAL_HEADERS_MONTHLY = [
+  'm_price_vol_up',
+  'm_kd_low_golden',
+  'm_2m_no_break_low',
+  'mid_lead_hits_m',
+  'mid_lead_m_count',
+  'mid_position_cap'
+];
+
 /** 第一次用：補齊表頭（不會刪你資料，只會在空表時加表頭；若表不存在會自動建立） */
 function initSheets_TW() {
   const ss = SpreadsheetApp.getActive();
@@ -324,6 +333,42 @@ function calcSignalsFromRows_(rows) {
   const macd = calcWeeklyMacd_(wCloses, infoLogs);
   const wk_macd_golden = macd.status;
 
+  // 月級別
+  const months = toMonthlyBars_(rows);
+
+  let m_price_vol_up = '';
+  if (months.length >= 2) {
+    const lastMonth = months[months.length - 1];
+    const prevMonth = months[months.length - 2];
+    const priceUp = lastMonth.close > prevMonth.close;
+    const volUp = lastMonth.volume > prevMonth.volume * 1.05;
+    m_price_vol_up = (priceUp && volUp) ? 'TRUE' : 'FALSE';
+  }
+
+  const mkd = calcMonthlyKDLowGolden_(months, infoLogs);
+  const m_kd_low_golden = mkd.status;
+
+  let m_2m_no_break_low = '';
+  if (months.length >= 3) {
+    const M = months[months.length - 1];
+    const M1 = months[months.length - 2];
+    const M2 = months[months.length - 3];
+    const condA = M.close >= M1.low;
+    const condB = M1.close >= M2.low;
+    m_2m_no_break_low = (condA && condB) ? 'TRUE' : 'FALSE';
+  }
+
+  const midHits = [];
+  const monthlyStatuses = [m_price_vol_up, m_kd_low_golden, m_2m_no_break_low];
+  const monthlyAvailable = monthlyStatuses.some(s => s !== '');
+  if (m_price_vol_up === 'TRUE') midHits.push('1');
+  if (m_kd_low_golden === 'TRUE') midHits.push('2');
+  if (m_2m_no_break_low === 'TRUE') midHits.push('3');
+
+  const mid_lead_hits_m = monthlyAvailable ? (midHits.length ? midHits.join(',') : '') : '';
+  const mid_lead_m_count = monthlyAvailable ? String(midHits.length) : '';
+  const mid_position_cap = (monthlyAvailable && midHits.length >= 3) ? '20%' : '';
+
   // 底部領先訊號彙總
   const conds = [];
   const hits1to5 = [];
@@ -427,6 +472,13 @@ function calcSignalsFromRows_(rows) {
     above_ma10w,
     wk_macd_golden,
     wk_ma10w_2w_up,
+
+    m_price_vol_up,
+    m_kd_low_golden,
+    m_2m_no_break_low,
+    mid_lead_hits_m,
+    mid_lead_m_count,
+    mid_position_cap,
 
     infoLogs
   };
@@ -678,6 +730,31 @@ function toWeeklyBars_(rows) {
   return weeks;
 }
 
+function toMonthlyBars_(rows) {
+  if (!rows || !rows.length) return [];
+  const months = [];
+  rows.forEach(r => {
+    const key = r.date.slice(0, 7);
+    if (!months.length || months[months.length - 1].key !== key) {
+      months.push({
+        key,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: r.volume
+      });
+    } else {
+      const m = months[months.length - 1];
+      m.high = Math.max(m.high, r.high);
+      m.low = Math.min(m.low, r.low);
+      m.close = r.close;
+      m.volume += r.volume;
+    }
+  });
+  return months;
+}
+
 function calcWeeklyKDG_(weeks, infoLogs) {
   if (!weeks || weeks.length === 0) return { status: '', available: false, hit: false };
 
@@ -739,6 +816,49 @@ function calcWeeklyMacd_(wCloses, infoLogs) {
   }
 
   const hit = macdLine[lastIdx] > signalLine[lastIdx] && macdLine[prevIdx] <= signalLine[prevIdx];
+  return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
+}
+
+function calcMonthlyKDLowGolden_(months, infoLogs) {
+  if (!months || months.length === 0) return { status: '', available: false, hit: false };
+
+  if (months.length < 12) {
+    infoLogs.push(`m_kd_low_golden skipped: months < 12 (have ${months.length})`);
+    return { status: '', available: false, hit: false };
+  }
+
+  let K = 50;
+  let D = 50;
+  let prevK = null;
+  let prevD = null;
+
+  for (let i = 0; i < months.length; i++) {
+    if (i < 8) continue; // 9 個月才開始 RSV
+    const window = months.slice(Math.max(0, i - 8), i + 1);
+    const highs = window.map(m => m.high);
+    const lows = window.map(m => m.low);
+    const close = months[i].close;
+
+    const highestHigh = Math.max(...highs);
+    const lowestLow = Math.min(...lows);
+    if (highestHigh === lowestLow) continue;
+    const RSV = (close - lowestLow) / (highestHigh - lowestLow) * 100;
+    K = (2 / 3) * K + (1 / 3) * RSV;
+    D = (2 / 3) * D + (1 / 3) * K;
+
+    if (i === months.length - 1) break;
+    prevK = K;
+    prevD = D;
+  }
+
+  if (prevK === null || prevD === null) {
+    infoLogs.push('m_kd_low_golden skipped: insufficient RSV history');
+    return { status: '', available: false, hit: false };
+  }
+
+  const golden = (K > D) && (prevK <= prevD);
+  const lowBand = (K < 60) && (D < 60);
+  const hit = golden && lowBand;
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
@@ -811,6 +931,7 @@ function buildSignalHeaders_(existingHeader) {
 
   SIGNAL_HEADERS_BASE.forEach(addField);
   SIGNAL_HEADERS_WEEKLY.forEach(addField);
+  SIGNAL_HEADERS_MONTHLY.forEach(addField);
 
   return finalHeaders;
 }
