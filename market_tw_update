@@ -1,11 +1,17 @@
 /** =========================================================
- * market_tw_update.gs  (Stable + Date-safe)
+ * market_tw_update.gs  (Stable + Date-safe + 3-layer fallback)
  * Daily update: fetch today (or given date), append Raw, compute Signals
  *
+ * Layers:
+ *   1) TWSE RWD afterTrading/MT_INDX (date-specific)  -> may 404 sometimes
+ *   2) TWSE legacy exchangeReport/MI_INDEX (date-specific)
+ *   3) TWSE OpenAPI exchangeReport/MI_INDEX (latest) + ROC date support
+ *
  * Fixes:
- * 1) Normalize raw date values (Date object / string) -> yyyy-MM-dd
+ * 1) Normalize raw date values (Date object / string / ROC yyyMMdd) -> yyyy-MM-dd
  * 2) Sort raw rows by date asc so "latest" always correct
- * 3) Prevent duplicate append when existing dates are Date objects
+ * 3) Prevent duplicate append when existing dates are Date objects / ROC strings
+ * 4) If fetch failed => DO NOT clear Signals (keeps last valid row)
  * ========================================================= */
 
 var MarketTWUpdate = (function () {
@@ -24,14 +30,19 @@ var MarketTWUpdate = (function () {
 
     // 今天（台北時區）
     const todayYmd = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyyMMdd');
+
+    // ✅ 三層抓資料
     const parsed = fetchOneDay_(todayYmd);
 
-    // 若今天非交易日/尚未出完資料，parsed 會是 null：直接略過，不要把 Signals 清空
+    // 若今天非交易日/尚未出完資料，parsed 會是 null：略過，不清空 Signals
     if (parsed) {
       appendIfNotExists_(raw, parsed);
+    } else {
+      Logger.log(`[runMarketTW] No new data for want=${todayYmd}. Keep Signals as-is.`);
+      return;
     }
 
-    const all = readRaw_(raw); // ✅ normalized + sorted
+    const all = readRaw_(raw); // normalized + sorted + dedup
     if (all.length < MA60_N + 1) {
       Logger.log(`Not enough trading days in Raw: ${all.length}`);
       return;
@@ -54,23 +65,116 @@ var MarketTWUpdate = (function () {
     ]);
   }
 
+  // =======================
+  // Fetch (3-layer)
+  // =======================
   function fetchOneDay_(yyyymmdd) {
+    // Layer 1) RWD (date-specific)
+    const rwd = fetchFromRwd_(yyyymmdd);
+    if (rwd) return rwd;
+
+    // Layer 2) legacy exchangeReport (date-specific)
+    const legacy = fetchFromLegacy_(yyyymmdd);
+    if (legacy) return legacy;
+
+    // Layer 3) OpenAPI (latest) — only accept if date >= want
+    const oa = fetchFromOpenApi_(yyyymmdd);
+    if (oa) return oa;
+
+    return null;
+  }
+
+  function fetchFromRwd_(yyyymmdd) {
     const url = `https://www.twse.com.tw/rwd/zh/afterTrading/MT_INDX?response=json&date=${yyyymmdd}&type=ALL`;
     const resp = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    if (resp.getResponseCode() !== 200) return null;
 
+    Logger.log(`[MT_INDX:RWD] want=${yyyymmdd} code=${resp.getResponseCode()}`);
     const txt = resp.getContentText();
+    Logger.log(`[MT_INDX:RWD] body_head=${txt ? txt.slice(0, 120) : '(empty)'}`);
+
+    if (resp.getResponseCode() !== 200) return null;
     if (!txt) return null;
 
     let json;
-    try { json = JSON.parse(txt); } catch (e) { return null; }
+    try { json = JSON.parse(txt); } catch (e) {
+      Logger.log(`[MT_INDX:RWD] JSON parse error: ${e}`);
+      return null;
+    }
 
-    return parseTaiExFromTables_(json, yyyymmdd);
+    const parsed = parseTaiExFromTables_(json, yyyymmdd);
+    if (!parsed) return null;
+
+    // RWD 是 date-specific；若解析成功就直接用
+    return parsed;
   }
 
+  function fetchFromLegacy_(yyyymmdd) {
+    // 注意：這支常比 rwd 穩（date-specific）
+    const url = `https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date=${yyyymmdd}&type=ALL`;
+    const resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+
+    Logger.log(`[MI_INDEX:LEGACY] want=${yyyymmdd} code=${resp.getResponseCode()}`);
+    const txt = resp.getContentText();
+    Logger.log(`[MI_INDEX:LEGACY] body_head=${txt ? txt.slice(0, 120) : '(empty)'}`);
+
+    if (resp.getResponseCode() !== 200) return null;
+    if (!txt) return null;
+
+    let json;
+    try { json = JSON.parse(txt); } catch (e) {
+      Logger.log(`[MI_INDEX:LEGACY] JSON parse error: ${e}`);
+      return null;
+    }
+
+    // legacy 結構跟 rwd 很像，也有 tables
+    const parsed = parseTaiExFromTables_(json, yyyymmdd);
+    if (!parsed) return null;
+
+    return parsed;
+  }
+
+  function fetchFromOpenApi_(yyyymmdd) {
+    const url = `https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX`;
+    const resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+
+    Logger.log(`[MI_INDEX:OPENAPI] want=${yyyymmdd} code=${resp.getResponseCode()}`);
+    const txt = resp.getContentText();
+    Logger.log(`[MI_INDEX:OPENAPI] body_head=${txt ? txt.slice(0, 120) : '(empty)'}`);
+
+    if (resp.getResponseCode() !== 200) return null;
+    if (!txt) return null;
+
+    let arr;
+    try { arr = JSON.parse(txt); } catch (e) {
+      Logger.log(`[MI_INDEX:OPENAPI] JSON parse error: ${e}`);
+      return null;
+    }
+
+    const parsed = parseTaiExFromOpenApi_(arr);
+    if (!parsed) return null;
+
+    // ✅ OpenAPI 多半回「最新交易日」；只有當 latest >= want 才視為滿足（避免拿舊資料冒充今天）
+    const wantIso = toIsoDate_(yyyymmdd);
+    if (parsed.date && parsed.date < wantIso) {
+      Logger.log(`[MI_INDEX:OPENAPI] latest(${parsed.date}) < want(${wantIso}) => not-ready`);
+      return null;
+    }
+
+    return parsed;
+  }
+
+  // =======================
+  // Parsers
+  // =======================
   function parseTaiExFromTables_(json, yyyymmdd) {
     const tables = Array.isArray(json && json.tables) ? json.tables : null;
     if (!tables) return null;
@@ -87,7 +191,7 @@ var MarketTWUpdate = (function () {
             market: MARKET_CODE,
             date: toIsoDate_(yyyymmdd),   // yyyy-MM-dd
             close,
-            market_value: '',
+            market_value: '',             // 這支表通常沒有你要的 value/volume
             market_volume: ''
           };
         }
@@ -96,7 +200,47 @@ var MarketTWUpdate = (function () {
     return null;
   }
 
-  /** ✅ 避免重複：existing date 也 normalize 成 yyyy-MM-dd 再比對 */
+  function parseTaiExFromOpenApi_(arr) {
+    if (!Array.isArray(arr)) return null;
+
+    for (const it of arr) {
+      // OpenAPI 欄位多為中文鍵：日期/指數/收盤指數/成交金額/成交股數...
+      const name = String(it['指數'] ?? it.IndexName ?? it.Index ?? '').trim();
+      if (!name.includes('發行量加權股價指數')) continue;
+
+      const close = parseNum_(it['收盤指數'] ?? it.ClosingIndex ?? it.Close ?? '');
+      if (!isFinite(close) || close <= 0) return null;
+
+      // ✅ 日期可能是:
+      // - "2026/01/05"
+      // - "2026-01-05"
+      // - 民國 7 碼 "1150102"
+      const dateIso = normalizeDate_(it['日期'] ?? it.Date ?? it.date ?? '');
+      if (!dateIso) return null;
+
+      // 成交金額/成交股數（若沒有就留空）
+      const mv = it['成交金額'] ?? it.TradeValue ?? '';
+      const mvol = it['成交股數'] ?? it.TradeVolume ?? '';
+
+      return {
+        market: MARKET_CODE,
+        date: dateIso,
+        close,
+        market_value: mv,
+        market_volume: mvol
+      };
+    }
+
+    return null;
+  }
+
+  // =======================
+  // Raw sheet I/O
+  // =======================
+  function ensureRawHeader_(sh) {
+    if (sh.getLastRow() === 0) sh.appendRow(['market','date','close','market_value','market_volume']);
+  }
+
   function appendIfNotExists_(sh, obj) {
     const lastRow = sh.getLastRow();
     const exist = (lastRow >= 2)
@@ -106,12 +250,21 @@ var MarketTWUpdate = (function () {
 
     const d = normalizeDate_(obj.date);
     if (!d) return;
-    if (set.has(d)) return;
+    if (set.has(d)) {
+      Logger.log(`[appendIfNotExists_] already has date=${d}, skip`);
+      return;
+    }
 
-    sh.getRange(lastRow + 1, 1, 1, 5).setValues([[obj.market, d, obj.close, obj.market_value, obj.market_volume]]);
+    sh.getRange(lastRow + 1, 1, 1, 5).setValues([[
+      obj.market,
+      d,
+      obj.close,
+      obj.market_value ?? '',
+      obj.market_volume ?? ''
+    ]]);
+    Logger.log(`[appendIfNotExists_] appended date=${d} close=${obj.close}`);
   }
 
-  /** ✅ 讀 Raw：date 正規化 + 排序（確保最後一筆是最新交易日） */
   function readRaw_(sh) {
     if (sh.getLastRow() < 2) return [];
     const v = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
@@ -127,7 +280,7 @@ var MarketTWUpdate = (function () {
     // asc by date
     rows.sort((a, b) => a.date.localeCompare(b.date));
 
-    // 去重：同一天只留最後一筆（防止歷史上被重複寫入）
+    // 去重：同一天只留最後一筆
     const dedup = [];
     const seen = new Set();
     for (let i = rows.length - 1; i >= 0; i--) {
@@ -141,8 +294,10 @@ var MarketTWUpdate = (function () {
     return dedup;
   }
 
+  // =======================
+  // Signals
+  // =======================
   function calcSignal_(rows) {
-    // rows 已排序 asc
     const closes = rows.map(r => r.close);
     const last = rows[rows.length - 1];
 
@@ -153,7 +308,6 @@ var MarketTWUpdate = (function () {
 
     const state = last.close >= ma60 ? 'ABOVE' : 'BELOW';
 
-    // streak days: 從最後往前數，連續同一狀態的天數
     let streak = 0;
     for (let i = rows.length - 1; i >= 0; i--) {
       const c = rows[i].close;
@@ -175,10 +329,9 @@ var MarketTWUpdate = (function () {
     return s / win;
   }
 
-  function ensureRawHeader_(sh) {
-    if (sh.getLastRow() === 0) sh.appendRow(['market','date','close','market_value','market_volume']);
-  }
-
+  // =======================
+  // Utils
+  // =======================
   function toIsoDate_(yyyymmdd) {
     return `${yyyymmdd.slice(0,4)}-${yyyymmdd.slice(4,6)}-${yyyymmdd.slice(6,8)}`;
   }
@@ -188,7 +341,15 @@ var MarketTWUpdate = (function () {
     return isFinite(n) ? n : NaN;
   }
 
-  /** ✅ Date 正規化：Date object / yyyy-mm-dd / yyyy/mm/dd / 其他可 parse 字串 -> yyyy-MM-dd */
+  /**
+   * Date 正規化：
+   * - Date object
+   * - yyyy-MM-dd
+   * - yyyy/MM/dd
+   * - yyyymmdd
+   * - 民國 7 碼 yyyMMdd (e.g. 1150102) -> 2026-01-02
+   * - 其他可 parse 字串
+   */
   function normalizeDate_(val) {
     if (!val) return '';
 
@@ -200,13 +361,29 @@ var MarketTWUpdate = (function () {
     const s = String(val).trim();
     if (!s) return '';
 
-    // yyyy-mm-dd
+    // yyyy-MM-dd
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
 
-    // yyyy/mm/dd
+    // yyyy/MM/dd
     if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replace(/\//g, '-');
 
-    // Try parse (e.g., "Tue Sep 16 2025 00:00:00 GMT+0800 ...")
+    // yyyymmdd
+    if (/^\d{8}$/.test(s)) {
+      return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+    }
+
+    // ROC yyyMMdd (7 digits) e.g. 1150102 -> 2026-01-02
+    if (/^\d{7}$/.test(s)) {
+      const rocYear = Number(s.slice(0, 3));
+      const adYear = rocYear + 1911;
+      const mm = s.slice(3, 5);
+      const dd = s.slice(5, 7);
+      if (adYear >= 1912 && Number(mm) >= 1 && Number(mm) <= 12 && Number(dd) >= 1 && Number(dd) <= 31) {
+        return `${adYear}-${mm}-${dd}`;
+      }
+    }
+
+    // Try parse
     const d = new Date(s);
     if (!isNaN(d)) return Utilities.formatDate(d, 'Asia/Taipei', 'yyyy-MM-dd');
 
@@ -216,8 +393,7 @@ var MarketTWUpdate = (function () {
   return { runMarketTW };
 })();
 
-
-// ✅ Apps Script 可執行入口（出現在下拉選單）
+// ✅ Apps Script 可執行入口
 function runMarketTW() {
   MarketTWUpdate.runMarketTW();
 }
