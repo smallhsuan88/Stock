@@ -23,6 +23,11 @@ const NECKLINE_EPS = 0.005;
 
 const SLEEP_MS_EACH_TICKER = 250; // 避免被節流
 
+const TIME_BUDGET_MS = 330000; // 5.5 min
+const CHUNK_MIN_LEFT_MS = 15000; // 剩15秒就收尾
+const PROP_KEY = 'TW_MVP_PROGRESS';
+const PROP_TRIGGER_AT = 'TW_MVP_NEXT_TRIGGER_AT';
+
 const SIGNAL_HEADERS_BASE = [
   'market','ticker','date','close','volume',
   'ma10','ma20','ma60','ma10_slope','ma20_slope','ma60_slope',
@@ -83,60 +88,130 @@ function initSheets_TW() {
 
 /** 每天收盤後跑 */
 function runTW_MVP() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+
   const ss = SpreadsheetApp.getActive();
+  const props = PropertiesService.getScriptProperties();
+  const logBuffer = [];
+  const signalsRows = [];
+  const newRawRows = [];
+  const tickersToUpdate = new Set();
+  let raw = null;
+  let sig = null;
+  let logSheet = null;
+  let rawHeader = null;
+  let rawExistingRows = null;
+  let sigHeader = null;
 
-  const cfg = getOrCreateSheet_(ss, SHEET_CONFIG);
-  const raw = getOrCreateSheet_(ss, SHEET_RAW);
-  const sig = getOrCreateSheet_(ss, SHEET_SIGNALS);
-  getOrCreateSheet_(ss, SHEET_LOG); // 確保 Log 存在
+  try {
+    const cfg = getOrCreateSheet_(ss, SHEET_CONFIG);
+    raw = getOrCreateSheet_(ss, SHEET_RAW);
+    sig = getOrCreateSheet_(ss, SHEET_SIGNALS);
+    logSheet = getOrCreateSheet_(ss, SHEET_LOG);
 
-  const tickers = readTickers_(cfg);
-  if (tickers.length === 0) {
-    return log_(ss, 'WARN', '', 'No active tickers in Config_TW');
-  }
+    const tickers = readTickers_(cfg);
+    if (tickers.length === 0) {
+      log_(logBuffer, 'WARN', '', 'No active tickers in Config_TW');
+      flushLogs_(logSheet, logBuffer);
+      return;
+    }
 
-  // 重新產出 Signals（MVP 穩）
-  const existingHeader = sig.getLastRow() > 0
-    ? sig.getRange(1, 1, 1, sig.getLastColumn()).getValues()[0].filter(v => String(v).trim() !== '')
-    : [];
-  const sigHeader = buildSignalHeaders_(existingHeader);
-  sig.clearContents();
-  sig.appendRow(sigHeader);
+    const tickersKey = tickers.join(',');
+    let progress = parseProgress_(props.getProperty(PROP_KEY));
+    const nowMs = Date.now();
+    const runStartMs = nowMs;
+    let runId = progress.runId;
+    let next = progress.next || 0;
+    let startedAt = progress.startedAt || nowMs;
 
-  const started = new Date();
-  log_(ss, 'INFO', '', `Run started. tickers=${tickers.length}, months=${LOOKBACK_MONTHS}`);
+    if (!runId || progress.tickersKey !== tickersKey || next >= tickers.length) {
+      runId = Utilities.getUuid();
+      next = 0;
+      startedAt = nowMs;
+    }
 
-  tickers.forEach((ticker) => {
-    try {
-      const rows = fetchTWSEStockDayMonths_(ticker, LOOKBACK_MONTHS); // asc by date
-      if (!rows.length) {
-        log_(ss, 'WARN', ticker, 'No rows fetched (maybe ETF/OTC or API empty)');
+    props.setProperty(PROP_KEY, JSON.stringify({
+      next,
+      runId,
+      startedAt,
+      tickersKey
+    }));
+
+    const rawValues = raw.getLastRow() > 0 ? raw.getDataRange().getValues() : [];
+    rawHeader = rawValues.length
+      ? rawValues[0]
+      : ['ticker','date','open','high','low','close','volume'];
+    rawExistingRows = rawValues.length > 1 ? rawValues.slice(1) : [];
+
+    const existingSigHeader = sig.getLastRow() > 0
+      ? sig.getRange(1, 1, 1, sig.getLastColumn()).getValues()[0].filter(v => String(v).trim() !== '')
+      : [];
+    sigHeader = buildSignalHeaders_(existingSigHeader);
+    if (next === 0) {
+      sig.clearContents();
+      sig.getRange(1, 1, 1, sigHeader.length).setValues([sigHeader]);
+    } else if (sig.getLastRow() === 0) {
+      sig.getRange(1, 1, 1, sigHeader.length).setValues([sigHeader]);
+    }
+
+    log_(logBuffer, 'INFO', '', `Run started. runId=${runId} tickers=${tickers.length}, months=${LOOKBACK_MONTHS}, next=${next}`);
+
+    for (let i = next; i < tickers.length; i++) {
+      const ticker = tickers[i];
+      try {
+        const rows = fetchTWSEStockDayMonths_(ticker, LOOKBACK_MONTHS); // asc by date
+        if (!rows.length) {
+          log_(logBuffer, 'WARN', ticker, 'No rows fetched (maybe ETF/OTC or API empty)');
+        } else {
+          tickersToUpdate.add(ticker);
+          rows.forEach(r => newRawRows.push([ticker, r.date, r.open, r.high, r.low, r.close, r.volume]));
+
+          const calc = calcSignalsFromRows_(rows);
+          signalsRows.push(buildSignalRow_(sigHeader, calc, ticker));
+
+          log_(logBuffer, 'INFO', ticker,
+            `OK ${calc.date} breakout=${calc.breakout} ` +
+            `vol_ratio=${num_(calc.vol_ratio,2)} rsi=${num_(calc.rsi14,1)} adx=${num_(calc.adx14,1)}`
+          );
+          if (calc.infoLogs && calc.infoLogs.length) {
+            calc.infoLogs.forEach(msg => log_(logBuffer, 'INFO', ticker, msg));
+          }
+        }
+      } catch (e) {
+        log_(logBuffer, 'ERROR', ticker, String(e && e.stack ? e.stack : e));
+      } finally {
+        Utilities.sleep(SLEEP_MS_EACH_TICKER);
+      }
+
+      if (Date.now() - runStartMs > TIME_BUDGET_MS - CHUNK_MIN_LEFT_MS) {
+        props.setProperty(PROP_KEY, JSON.stringify({
+          next: i + 1,
+          runId,
+          startedAt,
+          tickersKey
+        }));
+        scheduleNextRun_(props);
+        log_(logBuffer, 'INFO', '', `Paused & scheduled next run. next=${i + 1}`);
         return;
       }
-
-      // Raw：先刪 ticker 再寫
-      replaceRawForTicker_(raw, ticker, rows);
-
-      const calc = calcSignalsFromRows_(rows);
-
-      sig.appendRow(buildSignalRow_(sigHeader, calc, ticker));
-
-      log_(ss, 'INFO', ticker,
-        `OK ${calc.date} breakout=${calc.breakout} ` +
-        `vol_ratio=${num_(calc.vol_ratio,2)} rsi=${num_(calc.rsi14,1)} adx=${num_(calc.adx14,1)}`
-      );
-      if (calc.infoLogs && calc.infoLogs.length) {
-        calc.infoLogs.forEach(msg => log_(ss, 'INFO', ticker, msg));
-      }
-    } catch (e) {
-      log_(ss, 'ERROR', ticker, String(e && e.stack ? e.stack : e));
-    } finally {
-      Utilities.sleep(SLEEP_MS_EACH_TICKER);
     }
-  });
 
-  const secs = Math.round((new Date().getTime() - started.getTime()) / 1000);
-  log_(ss, 'INFO', '', `Run finished. seconds=${secs}`);
+    const secs = Math.round((Date.now() - runStartMs) / 1000);
+    log_(logBuffer, 'INFO', '', `Run finished. seconds=${secs}`);
+    props.deleteProperty(PROP_KEY);
+    props.deleteProperty(PROP_TRIGGER_AT);
+
+  } catch (e) {
+    log_(logBuffer, 'ERROR', '', String(e && e.stack ? e.stack : e));
+  } finally {
+    if (sig && sigHeader) flushSignals_(sig, signalsRows, sigHeader);
+    if (logSheet) flushLogs_(logSheet, logBuffer);
+    if (raw && rawHeader && rawExistingRows) {
+      flushRaw_(raw, rawHeader, rawExistingRows, tickersToUpdate, newRawRows);
+    }
+    lock.releaseLock();
+  }
 }
 
 /** 讀取 Config_TW：A=ticker, B=active(TRUE/FALSE) */
@@ -163,26 +238,10 @@ function fetchTWSEStockDayMonths_(ticker, monthsBack) {
     const d = new Date(now.getFullYear(), now.getMonth() - m, 1);
     const y = d.getFullYear();
     const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${y}${mm}01&stockNo=${ticker}`;
+    const data = fetchTWSEMonthData_(ticker, y, mm);
+    if (!data) continue;
 
-    const resp = UrlFetchApp.fetch(url, {
-      muteHttpExceptions: true,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    const code = resp.getResponseCode();
-    if (code !== 200) continue;
-
-    const text = resp.getContentText();
-    let json;
-    try {
-      json = JSON.parse(text);
-    } catch (_) {
-      continue;
-    }
-
-    if (!json || !json.data || !Array.isArray(json.data)) continue;
-
-    json.data.forEach(arr => {
+    data.forEach(arr => {
       const dateISO = rocToISO_(arr[0]);
       if (!dateISO) return;
 
@@ -210,6 +269,38 @@ function fetchTWSEStockDayMonths_(ticker, monthsBack) {
   return dedup;
 }
 
+function fetchTWSEMonthData_(ticker, year, mm) {
+  const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${year}${mm}01&stockNo=${ticker}`;
+  const backoffMs = [300, 800];
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true,
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+      const code = resp.getResponseCode();
+      if (code !== 200) throw new Error(`HTTP ${code}`);
+
+      const text = resp.getContentText();
+      const json = JSON.parse(text);
+      if (!json || !json.data || !Array.isArray(json.data)) {
+        throw new Error('Invalid JSON payload');
+      }
+      if (json.stat && json.stat !== 'OK') {
+        throw new Error(`stat=${json.stat}`);
+      }
+      return json.data;
+    } catch (e) {
+      if (attempt < backoffMs.length) {
+        Utilities.sleep(backoffMs[attempt]);
+      }
+    }
+  }
+
+  return null;
+}
+
 /** volume 更安全：優先用 arr[1]（成交股數），若異常再 fallback */
 function safeVolume_(arr) {
   const v1 = parseNum_(arr[1]);
@@ -221,22 +312,26 @@ function safeVolume_(arr) {
   return 0;
 }
 
-/** Raw：刪掉該 ticker 舊資料，再寫入新資料 */
-function replaceRawForTicker_(rawSheet, ticker, rows) {
-  const lastRow = rawSheet.getLastRow();
-  if (lastRow >= 2) {
-    const range = rawSheet.getRange(2, 1, lastRow - 1, 1).getValues(); // ticker col
-    const toDelete = [];
-    for (let i = 0; i < range.length; i++) {
-      if (String(range[i][0]).trim() === ticker) toDelete.push(i + 2);
-    }
-    for (let i = toDelete.length - 1; i >= 0; i--) {
-      rawSheet.deleteRow(toDelete[i]);
-    }
-  }
+/** Raw：批次合併回寫（移除本次 tickers 舊資料後一次寫入） */
+function flushRaw_(rawSheet, header, existingRows, tickersToUpdate, newRows) {
+  if (!tickersToUpdate.size) return;
 
-  const out = rows.map(r => [ticker, r.date, r.open, r.high, r.low, r.close, r.volume]);
-  rawSheet.getRange(rawSheet.getLastRow() + 1, 1, out.length, 7).setValues(out);
+  const merged = existingRows.filter(row => {
+    const key = String(row[0] || '').trim();
+    if (!key) return true;
+    return !tickersToUpdate.has(key);
+  }).concat(newRows);
+
+  rawSheet.clearContents();
+  rawSheet.getRange(1, 1, 1, header.length).setValues([header]);
+
+  if (!merged.length) return;
+
+  const batchSize = 5000;
+  for (let i = 0; i < merged.length; i += batchSize) {
+    const batch = merged.slice(i, i + batchSize);
+    rawSheet.getRange(2 + i, 1, batch.length, header.length).setValues(batch);
+  }
 }
 
 /** 計算最新一日 signals（含 prev 欄位） */
@@ -1062,13 +1157,54 @@ function buildSignalRow_(header, calc, ticker) {
   return header.map(h => Object.prototype.hasOwnProperty.call(values, h) ? values[h] : '');
 }
 
-function log_(ss, level, ticker, message) {
-  const sheet = getOrCreateSheet_(ss, SHEET_LOG);
-  sheet.appendRow([new Date(), level, ticker, message]);
+function log_(buffer, level, ticker, message) {
+  buffer.push([new Date(), level, ticker, message]);
 }
 
 function getOrCreateSheet_(ss, name) {
   let sh = ss.getSheetByName(name);
   if (!sh) sh = ss.insertSheet(name);
   return sh;
+}
+
+function flushSignals_(sigSheet, signalsRows, sigHeader) {
+  if (!signalsRows.length) return;
+  const rowStart = sigSheet.getLastRow() + 1;
+  sigSheet.getRange(rowStart, 1, signalsRows.length, sigHeader.length).setValues(signalsRows);
+  signalsRows.length = 0;
+}
+
+function flushLogs_(logSheet, logBuffer) {
+  if (!logBuffer.length) return;
+  const rowStart = logSheet.getLastRow() + 1;
+  logSheet.getRange(rowStart, 1, logBuffer.length, 4).setValues(logBuffer);
+  logBuffer.length = 0;
+}
+
+function scheduleNextRun_(props) {
+  const now = Date.now();
+  const nextAtRaw = props.getProperty(PROP_TRIGGER_AT);
+  const nextAt = nextAtRaw ? Number(nextAtRaw) : 0;
+  if (nextAt && nextAt > now) return;
+
+  ScriptApp.newTrigger('runTW_MVP')
+    .timeBased()
+    .after(60 * 1000)
+    .create();
+  props.setProperty(PROP_TRIGGER_AT, String(now + 60 * 1000));
+}
+
+function parseProgress_(raw) {
+  if (!raw) return { next: 0, runId: '', startedAt: 0, tickersKey: '' };
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      next: Number(parsed.next || 0),
+      runId: parsed.runId || '',
+      startedAt: Number(parsed.startedAt || 0),
+      tickersKey: parsed.tickersKey || ''
+    };
+  } catch (e) {
+    return { next: 0, runId: '', startedAt: 0, tickersKey: '' };
+  }
 }
