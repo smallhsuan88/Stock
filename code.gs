@@ -13,6 +13,7 @@ const SHEET_LOG     = 'Log';
 
 const LOOKBACK_MONTHS = 18;   // 若要 MA60 覆蓋率更高，可改 9 或 12
 const HIGH_N   = 40;
+const PRESSURE_N = 50;
 const VOL_MA_N = 20;
 const TW_MA10_N   = 10;
 const TW_MA20_N   = 20;
@@ -349,6 +350,8 @@ function calcSignalsFromRows_(rows) {
   const ma10 = sma_(closes, TW_MA10_N);
   const ma20 = sma_(closes, TW_MA20_N);
   const ma60 = sma_(closes, TW_MA60_N);
+  const pressure50Series = rollingAvg_(highs, PRESSURE_N);
+  const pressure50 = pressure50Series.length ? pressure50Series[n - 1] : '';
 
   // 昨日均線（不含今天，用於 slope）
   const closesPrev = closes.slice(0, -1);
@@ -359,6 +362,8 @@ function calcSignalsFromRows_(rows) {
   const ma10_prev = sma_(closesPrev, TW_MA10_N);
   const ma20_prev = sma_(closesPrev, TW_MA20_N);
   const ma60_prev = sma_(closesPrev, TW_MA60_N);
+  const ma60_prev2 = sma_(closes.slice(0, -2), TW_MA60_N);
+  const pressure50_prev = pressure50Series.length > 1 ? pressure50Series[n - 2] : '';
 
   // 量均：用「前 20 日均量」當基準（不含今天）
   const vol_ma20 = sma_(volsPrev, VOL_MA_N);
@@ -438,7 +443,7 @@ function calcSignalsFromRows_(rows) {
     const lastMonth = months[months.length - 1];
     const prevMonth = months[months.length - 2];
     const priceUp = lastMonth.close > prevMonth.close;
-    const volUp = lastMonth.volume > prevMonth.volume * 1.05; // 可用 1.05 作為保護條件
+    const volUp = lastMonth.volume > prevMonth.volume;
     m_price_vol_up = (priceUp && volUp) ? 'TRUE' : 'FALSE';
   }
 
@@ -450,6 +455,7 @@ function calcSignalsFromRows_(rows) {
     const M = months[months.length - 1];
     const M1 = months[months.length - 2];
     const M2 = months[months.length - 3];
+    // 嚴格版：最近兩個月 low 都不低於各自前一個月 low。
     const condA = M.low >= M1.low;
     const condB = M1.low >= M2.low;
     m_2m_no_lower_low = (condA && condB) ? 'TRUE' : 'FALSE';
@@ -492,9 +498,14 @@ function calcSignalsFromRows_(rows) {
   const conds = [];
   const hits1to5 = [];
 
-  if (resline.available) {
-    conds.push(resline.hit);
-    if (resline.hit) hits1to5.push('1');
+  const prevClose = n >= 2 ? closes[n - 2] : '';
+  const cond1Available = isFiniteNum_(pressure50) && isFiniteNum_(pressure50_prev) && isFiniteNum_(prevClose);
+  if (cond1Available) {
+    const cond1 = prevClose <= pressure50_prev && last.close > pressure50;
+    conds.push(cond1);
+    if (cond1) hits1to5.push('1');
+  } else {
+    infoLogs.push('pressure50 unavailable for cond1 (need >= 50 highs + prev close)');
   }
   if (ma_bull_stack !== '') {
     conds.push(ma_bull_stack === 'TRUE');
@@ -508,13 +519,13 @@ function calcSignalsFromRows_(rows) {
     conds.push(neckline.hit);
     if (neckline.hit) hits1to5.push('4');
   }
-  const cond5Available = isFiniteNum_(ma60);
-  if (cond5Available) {
-    const cond5 = last.close > ma60;
+  const cond5Status = evalCond5Status_(last.close, ma60, ma60_prev, ma60_prev2);
+  if (cond5Status !== '') {
+    const cond5 = cond5Status === 'TRUE';
     conds.push(cond5);
     if (cond5) hits1to5.push('5');
   } else {
-    infoLogs.push('ma60 unavailable for cond5 (need >= 60 closes)');
+    infoLogs.push('ma60 unavailable for cond5 (need >= 62 closes)');
   }
 
   const weeklyHits = [];
@@ -524,7 +535,8 @@ function calcSignalsFromRows_(rows) {
     if (flag === 'TRUE' || flag === 'FALSE') weeklyAvailability.push(true);
   };
   pushWeekly(above_ma10w, '6');
-  pushWeekly(wk_kd_golden, '7');
+  const cond7Status = evalCond7Status_(last.close, ma10, ma20, ma60);
+  pushWeekly(cond7Status, '7');
   pushWeekly(wk_macd_golden, '8');
   pushWeekly(wk_ma10w_2w_up, '9');
 
@@ -625,11 +637,33 @@ function calcSignalsFromRows_(rows) {
 
 /** ===== Indicators ===== */
 
+function rollingAvg_(arr, win) {
+  if (!arr || arr.length < win) return new Array(arr ? arr.length : 0).fill('');
+  const out = new Array(arr.length).fill('');
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    sum += Number(arr[i]) || 0;
+    if (i >= win) sum -= Number(arr[i - win]) || 0;
+    if (i >= win - 1) out[i] = sum / win;
+  }
+  return out;
+}
+
 function sma_(arr, win) {
   if (!arr || arr.length < win) return '';
   let sum = 0;
   for (let i = arr.length - win; i < arr.length; i++) sum += Number(arr[i]) || 0;
   return sum / win;
+}
+
+function evalCond5Status_(close, ma60, ma60_prev1, ma60_prev2) {
+  if (!isFiniteNum_(close) || !isFiniteNum_(ma60) || !isFiniteNum_(ma60_prev1) || !isFiniteNum_(ma60_prev2)) return '';
+  return (close > ma60 && ma60 > ma60_prev1 && ma60_prev1 > ma60_prev2) ? 'TRUE' : 'FALSE';
+}
+
+function evalCond7Status_(close, ma10, ma20, ma60) {
+  if (!isFiniteNum_(close) || !isFiniteNum_(ma10) || !isFiniteNum_(ma20) || !isFiniteNum_(ma60)) return '';
+  return (close >= ma60 * 1.03 && ma10 > ma20 && ma20 > ma60) ? 'TRUE' : 'FALSE';
 }
 
 function rsiWilder_(closes, period) {
@@ -1207,4 +1241,49 @@ function parseProgress_(raw) {
   } catch (e) {
     return { next: 0, runId: '', startedAt: 0, tickersKey: '' };
   }
+}
+
+function testRules_TW() {
+  const logCheck = (name, pass, detail) => {
+    Logger.log(`${pass ? 'PASS' : 'FAIL'}: ${name}${detail ? ` - ${detail}` : ''}`);
+  };
+  const nearlyEqual = (a, b, eps) => Math.abs(a - b) <= (eps ?? 1e-6);
+
+  // #1 壓力線（50 筆 high 平均）與突破判斷
+  const highs = Array.from({ length: 52 }, (_, i) => i + 1);
+  const pressureSeries = rollingAvg_(highs, PRESSURE_N);
+  const rows = highs.map((high, idx) => ({
+    date: `2024-01-${String(idx + 1).padStart(2, '0')}`,
+    open: high,
+    high,
+    low: high,
+    close: high,
+    volume: 1000
+  }));
+  rows[50].close = pressureSeries[50];
+  rows[51].close = pressureSeries[51] + 0.5;
+  const pressureOk = nearlyEqual(pressureSeries[51], 27.5);
+  const cond1Hit = rows[50].close <= pressureSeries[50] && rows[51].close > pressureSeries[51];
+  logCheck('#1 pressure50 = 最近 50 筆 high 平均', pressureOk, `value=${pressureSeries[51]}`);
+  logCheck('#1 突破條件 (昨日<=pressure50 & 今日>pressure50)', cond1Hit);
+
+  // #5 MA60 連三日上升 + close > MA60
+  const closesUp = Array.from({ length: 62 }, (_, i) => i + 1);
+  const ma60 = sma_(closesUp, TW_MA60_N);
+  const ma60_prev1 = sma_(closesUp.slice(0, -1), TW_MA60_N);
+  const ma60_prev2 = sma_(closesUp.slice(0, -2), TW_MA60_N);
+  const cond5True = evalCond5Status_(closesUp[61], ma60, ma60_prev1, ma60_prev2) === 'TRUE';
+  const cond5False = evalCond5Status_(ma60 - 1, ma60, ma60_prev1, ma60_prev2) === 'FALSE';
+  const cond5Empty = evalCond5Status_(100, '', '', '') === '';
+  logCheck('#5 TRUE：MA60 連三日上升且 close > MA60', cond5True);
+  logCheck('#5 FALSE：close <= MA60', cond5False);
+  logCheck('#5 空值：資料不足', cond5Empty);
+
+  // #7 close >= 1.03 * MA60 且 MA10 > MA20 > MA60
+  const cond7True = evalCond7Status_(103, 120, 110, 100) === 'TRUE';
+  const cond7False = evalCond7Status_(102.9, 120, 110, 100) === 'FALSE';
+  const cond7Empty = evalCond7Status_(103, 120, 110, '') === '';
+  logCheck('#7 TRUE：close>=1.03*MA60 且 MA10>MA20>MA60', cond7True);
+  logCheck('#7 FALSE：close<1.03*MA60', cond7False);
+  logCheck('#7 空值：資料不足', cond7Empty);
 }
