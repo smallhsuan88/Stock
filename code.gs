@@ -47,7 +47,7 @@ const SIGNAL_HEADERS_BASE = [
   'neckline60',
   'break_neckline60',
   'bottom_lead_hits',
-  'bottom_lead_hits2',
+  'bottom_lead_hits2', // CHANGED
   'bottom_lead_count',
   'bottom_lead2_count',
   'position_cap',
@@ -1147,4 +1147,74 @@ function parseProgress_(raw) {
   } catch (e) {
     return { next: 0, runId: '', startedAt: 0, tickersKey: '' };
   }
+}
+
+function buildConfigMap_TW_() { // CHANGED
+  const ss = SpreadsheetApp.getActive(); // CHANGED
+  const cfg = ss.getSheetByName(SHEET_CONFIG); // CHANGED
+  if (!cfg || cfg.getLastRow() === 0) return {}; // CHANGED
+  const values = cfg.getDataRange().getValues(); // CHANGED
+  const header = (values[0] || []).map(h => String(h || '').trim()); // CHANGED
+  const tickerIdx = header.indexOf('ticker'); // CHANGED
+  const nameIdx = header.indexOf('name'); // CHANGED
+  const holdingIdx = header.indexOf('holding'); // CHANGED
+  if (tickerIdx < 0) return {}; // CHANGED
+  const map = {}; // CHANGED
+  for (let i = 1; i < values.length; i++) { // CHANGED
+    const row = values[i]; // CHANGED
+    const ticker = String(row[tickerIdx] ?? '').trim(); // CHANGED
+    if (!ticker) continue; // CHANGED
+    map[ticker] = { // CHANGED
+      name: nameIdx >= 0 ? String(row[nameIdx] ?? '').trim() : '', // CHANGED
+      holding: holdingIdx >= 0 ? String(row[holdingIdx] ?? '').trim() : '' // CHANGED
+    }; // CHANGED
+  }
+  return map; // CHANGED
+}
+
+function apiGetSignalsTW_() { // CHANGED
+  const ss = SpreadsheetApp.getActive(); // CHANGED
+  const sig = ss.getSheetByName(SHEET_SIGNALS); // CHANGED
+  if (!sig || sig.getLastRow() === 0) { // CHANGED
+    return ContentService.createTextOutput(JSON.stringify({ headers: [], rows: [] })) // CHANGED
+      .setMimeType(ContentService.MimeType.JSON); // CHANGED
+  }
+  const values = sig.getDataRange().getValues(); // CHANGED
+  const headerRow = (values[0] || []).map(h => String(h || '').trim()); // CHANGED
+  const headerIndex = {}; // CHANGED
+  headerRow.forEach((h, i) => { // CHANGED
+    if (h && headerIndex[h] === undefined) headerIndex[h] = i; // CHANGED
+  });
+  const filteredHeaders = headerRow.filter(h => h && h !== 'bottom_lead_hits2'); // CHANGED
+  const outputHeaders = filteredHeaders.slice(); // CHANGED
+  const tickerIdx = outputHeaders.indexOf('ticker'); // CHANGED
+  const insertAt = tickerIdx >= 0 ? tickerIdx + 1 : outputHeaders.length; // CHANGED
+  const insertHeaders = ['name', 'holding'].filter(h => !outputHeaders.includes(h)); // CHANGED
+  if (insertHeaders.length) outputHeaders.splice(insertAt, 0, ...insertHeaders); // CHANGED
+  const configMap = buildConfigMap_TW_(); // CHANGED
+  const rawTickerIdx = headerIndex.ticker; // CHANGED
+  const rows = []; // CHANGED
+  for (let i = 1; i < values.length; i++) { // CHANGED
+    const row = values[i]; // CHANGED
+    const ticker = rawTickerIdx !== undefined ? String(row[rawTickerIdx] ?? '').trim() : ''; // CHANGED
+    const cfg = ticker ? (configMap[ticker] || {}) : {}; // CHANGED
+    const outRow = outputHeaders.map(h => { // CHANGED
+      if (h === 'name') return cfg.name || ''; // CHANGED
+      if (h === 'holding') return cfg.holding || ''; // CHANGED
+      const idx = headerIndex[h]; // CHANGED
+      return idx === undefined ? '' : row[idx]; // CHANGED
+    });
+    rows.push(outRow); // CHANGED
+  }
+  const payload = { headers: outputHeaders, rows }; // CHANGED
+  return ContentService.createTextOutput(JSON.stringify(payload)) // CHANGED
+    .setMimeType(ContentService.MimeType.JSON); // CHANGED
+}
+
+function doGet(e) { // CHANGED
+  const action = e && e.parameter ? String(e.parameter.action || '') : ''; // CHANGED
+  if (action === 'getSignalsTW') { // CHANGED
+    return apiGetSignalsTW_(); // CHANGED
+  }
+  return HtmlService.createHtmlOutputFromFile('index'); // CHANGED
 }
