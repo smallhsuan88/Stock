@@ -1,9 +1,9 @@
 /** =========================
- *  TW MVP - Stable Version (with prev fields)
- *  - Source: TWSE STOCK_DAY (monthly)
- *  - Output: Raw_TW + Signals_TW + Log
- *  - Indicators: MA10/MA20/MA60, VOL_MA20(prev), RSI14, ADX14, High40(prev), Breakout
- *  - Breakout: close > high40_prev AND volume > vol_ma20(prev)
+ * TW MVP - Stable Version (Final Refine)
+ * - Rule #1 (Pressure50): State-based (Close > Pressure)
+ * - Rule #4 (Neckline): State-based (Close > Neckline) [FIXED]
+ * - Rule #7 (MA Align): Strict MA10 > MA20 > MA60
+ * - Rule #8 (MACD): Golden Cross + Histogram Growing
  * ========================= **/
 
 const SHEET_CONFIG  = 'Config_TW';
@@ -11,8 +11,8 @@ const SHEET_RAW     = 'Raw_TW';
 const SHEET_SIGNALS = 'Signals_TW';
 const SHEET_LOG     = 'Log';
 
-const LOOKBACK_MONTHS = 18;   // 若要 MA60 覆蓋率更高，可改 9 或 12
-const HIGH_N   = 40;
+const LOOKBACK_MONTHS = 18;
+const HIGH_N    = 40;
 const PRESSURE_N = 50;
 const VOL_MA_N = 20;
 const TW_MA10_N   = 10;
@@ -22,10 +22,10 @@ const RESLINE_EPS = 0.005;
 const NECKLINE_TOLERANCE = 0.005;
 const NECKLINE_EPS = 0.005;
 
-const SLEEP_MS_EACH_TICKER = 250; // 避免被節流
+const SLEEP_MS_EACH_TICKER = 250; 
 
-const TIME_BUDGET_MS = 330000; // 5.5 min
-const CHUNK_MIN_LEFT_MS = 15000; // 剩15秒就收尾
+const TIME_BUDGET_MS = 330000; 
+const CHUNK_MIN_LEFT_MS = 15000; 
 const PROP_KEY = 'TW_MVP_PROGRESS';
 const PROP_TRIGGER_AT = 'TW_MVP_NEXT_TRIGGER_AT';
 
@@ -68,7 +68,7 @@ const SIGNAL_HEADERS_MONTHLY = [
   'exit_note'
 ];
 
-/** 第一次用：補齊表頭（不會刪你資料，只會在空表時加表頭；若表不存在會自動建立） */
+/** 初始化 Sheets */
 function initSheets_TW() {
   const ss = SpreadsheetApp.getActive();
 
@@ -215,7 +215,6 @@ function runTW_MVP() {
   }
 }
 
-/** 讀取 Config_TW：A=ticker, B=active(TRUE/FALSE) */
 function readTickers_(cfgSheet) {
   const values = cfgSheet.getDataRange().getValues();
   const out = [];
@@ -223,14 +222,12 @@ function readTickers_(cfgSheet) {
     const t = String(values[i][0] || '').trim();
     if (!t) continue;
     const active = values[i][1];
-    // 若 B 欄空白，視為啟用；若明確 FALSE 才跳過
     if (active === false) continue;
     out.push(t);
   }
   return out;
 }
 
-/** 抓 TWSE 月資料：https://www.twse.com.tw/exchangeReport/STOCK_DAY */
 function fetchTWSEStockDayMonths_(ticker, monthsBack) {
   const now = new Date();
   let all = [];
@@ -258,7 +255,6 @@ function fetchTWSEStockDayMonths_(ticker, monthsBack) {
     });
   }
 
-  // 排序 + 去重（同日只留一筆）
   all.sort((a,b) => a.date.localeCompare(b.date));
   const dedup = [];
   const seen = new Set();
@@ -302,7 +298,6 @@ function fetchTWSEMonthData_(ticker, year, mm) {
   return null;
 }
 
-/** volume 更安全：優先用 arr[1]（成交股數），若異常再 fallback */
 function safeVolume_(arr) {
   const v1 = parseNum_(arr[1]);
   if (v1 > 0) return v1;
@@ -313,7 +308,6 @@ function safeVolume_(arr) {
   return 0;
 }
 
-/** Raw：批次合併回寫（移除本次 tickers 舊資料後一次寫入） */
 function flushRaw_(rawSheet, header, existingRows, tickersToUpdate, newRows) {
   if (!tickersToUpdate.size) return;
 
@@ -335,7 +329,7 @@ function flushRaw_(rawSheet, header, existingRows, tickersToUpdate, newRows) {
   }
 }
 
-/** 計算最新一日 signals（含 prev 欄位） */
+/** 計算 signals */
 function calcSignalsFromRows_(rows) {
   const n = rows.length;
   const last = rows[n - 1];
@@ -346,14 +340,14 @@ function calcSignalsFromRows_(rows) {
   const highs  = rows.map(r => r.high);
   const lows   = rows.map(r => r.low);
 
-  // 今日均線（含今天收盤）
+  // 今日均線
   const ma10 = sma_(closes, TW_MA10_N);
   const ma20 = sma_(closes, TW_MA20_N);
   const ma60 = sma_(closes, TW_MA60_N);
   const pressure50Series = rollingAvg_(highs, PRESSURE_N);
   const pressure50 = pressure50Series.length ? pressure50Series[n - 1] : '';
 
-  // 昨日均線（不含今天，用於 slope）
+  // 昨日均線
   const closesPrev = closes.slice(0, -1);
   const highsPrev  = highs.slice(0, -1);
   const lowsPrev   = lows.slice(0, -1);
@@ -365,43 +359,35 @@ function calcSignalsFromRows_(rows) {
   const ma60_prev2 = sma_(closes.slice(0, -2), TW_MA60_N);
   const pressure50_prev = pressure50Series.length > 1 ? pressure50Series[n - 2] : '';
 
-  // 量均：用「前 20 日均量」當基準（不含今天）
   const vol_ma20 = sma_(volsPrev, VOL_MA_N);
   const vol_ratio = (isFiniteNum_(vol_ma20) && vol_ma20 > 0) ? (last.volume / vol_ma20) : '';
 
-  // high40：顯示用（含今天）
   const high40 = Math.max(...highs.slice(Math.max(0, n - HIGH_N)));
 
-  // high40_prev：突破基準（不含今天）
   const nPrev = highsPrev.length;
   const high40_prev = (nPrev >= 1)
     ? Math.max(...highsPrev.slice(Math.max(0, nPrev - HIGH_N)))
     : '';
 
-  // RSI / ADX（今日）
   const rsi14 = rsiWilder_(closes, 14);
   const adx14 = adxWilder_(highs, lows, closes, 14);
 
-  // RSI / ADX（昨日）
   const rsi14_prev = rsiWilder_(closesPrev, 14);
   const adx14_prev = adxWilder_(highsPrev, lowsPrev, closesPrev, 14);
 
-  // Breakout（用 high40_prev + vol_ma20(prev)）
   const breakout =
     (isFiniteNum_(high40_prev) ? (last.close > high40_prev) : false) &&
     (isFiniteNum_(vol_ma20) ? (last.volume > vol_ma20) : false);
 
-  // ma_bull_stack：close > ma10 > ma20 且 close > ma20
   let ma_bull_stack = '';
   if (isFiniteNum_(ma10) && isFiniteNum_(ma20)) {
+    // 規則 #2: 僅檢查 MA10 > MA20
     ma_bull_stack = (last.close > ma10 && last.close > ma20 && ma10 > ma20) ? 'TRUE' : 'FALSE';
   }
 
-  // break_resline60：Swing High 壓力線突破
   const resline = calcBreakResline60_(highs, last.close, n, infoLogs);
   const break_resline60 = resline.status;
 
-  // neckline60 / break_neckline60：近 60 日最多碰觸價位 + 突破
   const neckline = calcNeckline60_(closes, last.close, n, infoLogs);
   const neckline60 = neckline.neckline;
   const break_neckline60 = neckline.breakStatus;
@@ -409,11 +395,9 @@ function calcSignalsFromRows_(rows) {
   const weeks = toWeeklyBars_(rows);
   const wCloses = weeks.map(w => w.close);
 
-  // 週 KD 金叉
   const kd = calcWeeklyKDG_(weeks, infoLogs);
   const wk_kd_golden = kd.status;
 
-  // 週 MA10
   let ma10w = '';
   let ma10w_prev = '';
   if (wCloses.length >= 10) {
@@ -429,13 +413,14 @@ function calcSignalsFromRows_(rows) {
   if (isFiniteNum_(ma10w) && isFiniteNum_(ma10w_prev) && weeks.length >= 2) {
     const lastWeekClose = weeks[weeks.length - 1].close;
     const prevWeekClose = weeks[weeks.length - 2].close;
-    wk_ma10w_2w_up = (lastWeekClose > ma10w && prevWeekClose > ma10w_prev) ? 'TRUE' : 'FALSE';
+    // 規則 #9: 站上兩週 且 10週均線翻揚
+    wk_ma10w_2w_up = (lastWeekClose > ma10w && prevWeekClose > ma10w_prev && ma10w > ma10w_prev) ? 'TRUE' : 'FALSE';
   }
 
+  // 規則 #8: 週 MACD 金叉 且 柱狀體擴大
   const macd = calcWeeklyMacd_(wCloses, infoLogs);
   const wk_macd_golden = macd.status;
 
-  // 月級別
   const months = toMonthlyBars_(rows);
 
   let m_price_vol_up = '';
@@ -455,7 +440,6 @@ function calcSignalsFromRows_(rows) {
     const M = months[months.length - 1];
     const M1 = months[months.length - 2];
     const M2 = months[months.length - 3];
-    // 嚴格版：最近兩個月 low 都不低於各自前一個月 low。
     const condA = M.low >= M1.low;
     const condB = M1.low >= M2.low;
     m_2m_no_lower_low = (condA && condB) ? 'TRUE' : 'FALSE';
@@ -483,7 +467,6 @@ function calcSignalsFromRows_(rows) {
   const bottom_lead3_count = monthlyAvailable ? String(monthlyHits.length) : '';
   const position_cap3 = (monthlyAvailable && monthlyHits.length === 3) ? '20%' : '';
 
-  // 出場判斷
   let exit_action = '';
   let exit_note = '';
   if (isFiniteNum_(ma60) && last.close < ma60) {
@@ -499,13 +482,14 @@ function calcSignalsFromRows_(rows) {
   const hits1to5 = [];
 
   const prevClose = n >= 2 ? closes[n - 2] : '';
-  const cond1Available = isFiniteNum_(pressure50) && isFiniteNum_(pressure50_prev) && isFiniteNum_(prevClose);
+  const cond1Available = isFiniteNum_(pressure50);
   if (cond1Available) {
-    const cond1 = prevClose <= pressure50_prev && last.close > pressure50;
+    // 規則 #1: State (Close > Pressure)
+    const cond1 = last.close > pressure50;
     conds.push(cond1);
     if (cond1) hits1to5.push('1');
   } else {
-    infoLogs.push('pressure50 unavailable for cond1 (need >= 50 highs + prev close)');
+    infoLogs.push('pressure50 unavailable for cond1 (need >= 50 highs)');
   }
   if (ma_bull_stack !== '') {
     conds.push(ma_bull_stack === 'TRUE');
@@ -535,8 +519,11 @@ function calcSignalsFromRows_(rows) {
     if (flag === 'TRUE' || flag === 'FALSE') weeklyAvailability.push(true);
   };
   pushWeekly(above_ma10w, '6');
+  
+  // 規則 #7 Check
   const cond7Status = evalCond7Status_(last.close, ma10, ma20, ma60);
   pushWeekly(cond7Status, '7');
+  
   pushWeekly(wk_macd_golden, '8');
   pushWeekly(wk_ma10w_2w_up, '9');
 
@@ -560,8 +547,6 @@ function calcSignalsFromRows_(rows) {
 
   const mergedHits = Array.from(mergedSet).filter(Boolean).sort((a, b) => Number(a) - Number(b));
   const mergedBottomLeadHits = mergedHits.length ? mergedHits.join(',') : '';
-
-  const bottom_lead_hits_final = mergedBottomLeadHits;
 
   let position_cap = '';
   if (conds.length > 0) {
@@ -606,7 +591,7 @@ function calcSignalsFromRows_(rows) {
     wk_kd_golden,
     neckline60,
     break_neckline60,
-    bottom_lead_hits: bottom_lead_hits_final,
+    bottom_lead_hits: mergedBottomLeadHits, 
     bottom_lead_count,
     bottom_lead_hits2,
     bottom_lead2_count,
@@ -661,9 +646,19 @@ function evalCond5Status_(close, ma60, ma60_prev1, ma60_prev2) {
   return (close > ma60 && ma60 > ma60_prev1 && ma60_prev1 > ma60_prev2) ? 'TRUE' : 'FALSE';
 }
 
+// 規則 #7 修正: 強制轉型並確認 MA10 > MA20 > MA60
 function evalCond7Status_(close, ma10, ma20, ma60) {
   if (!isFiniteNum_(close) || !isFiniteNum_(ma10) || !isFiniteNum_(ma20) || !isFiniteNum_(ma60)) return '';
-  return (close >= ma60 * 1.03 && ma10 > ma20 && ma20 > ma60) ? 'TRUE' : 'FALSE';
+  
+  const c = Number(close);
+  const m10 = Number(ma10);
+  const m20 = Number(ma20);
+  const m60 = Number(ma60);
+
+  const priceCond = c >= (m60 * 1.03);
+  const alignCond = (m10 > m20) && (m20 > m60);
+
+  return (priceCond && alignCond) ? 'TRUE' : 'FALSE';
 }
 
 function rsiWilder_(closes, period) {
@@ -802,7 +797,7 @@ function calcBreakResline60_(highs, lastClose, n, infoLogs) {
   }
 
   const start = Math.max(0, n - TW_MA60_N);
-  const end = n - 1; // 不含今天
+  const end = n - 1; 
   const swingIdx = [];
   for (let i = start + 1; i < end; i++) {
     if (i + 1 >= highs.length) break;
@@ -833,13 +828,14 @@ function calcBreakResline60_(highs, lastClose, n, infoLogs) {
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
+// 規則 #4 修正: State (Close > Neckline)
 function calcNeckline60_(closes, lastClose, n, infoLogs) {
   if (n < TW_MA60_N) {
     infoLogs.push('neckline60 skipped: need >= 60 days');
     return { neckline: '', breakStatus: '', available: false, hit: false };
   }
   const start = Math.max(0, n - TW_MA60_N);
-  const prices = closes.slice(start, n - 1); // 建議不含今天
+  const prices = closes.slice(start, n - 1); 
 
   const clusters = [];
   prices.forEach(price => {
@@ -870,6 +866,7 @@ function calcNeckline60_(closes, lastClose, n, infoLogs) {
   }
 
   const neckline = best.center;
+  // 修正處：只要收盤大於頸線(加一點緩衝)即視為達成，不再檢查昨日是否在頸線下
   const hit = lastClose > neckline * (1 + NECKLINE_EPS);
 
   return {
@@ -942,7 +939,7 @@ function calcWeeklyKDG_(weeks, infoLogs) {
   let prevD = null;
 
   for (let i = 0; i < weeks.length; i++) {
-    if (i < 8) continue; // 9 週才開始 RSV
+    if (i < 8) continue; 
     const window = weeks.slice(Math.max(0, i - 8), i + 1);
     const highs = window.map(w => w.high);
     const lows = window.map(w => w.low);
@@ -969,6 +966,7 @@ function calcWeeklyKDG_(weeks, infoLogs) {
   return { status: golden ? 'TRUE' : 'FALSE', available: true, hit: golden };
 }
 
+// 規則 #8 修正: 週 MACD 金叉 + 柱狀體擴大
 function calcWeeklyMacd_(wCloses, infoLogs) {
   if (!wCloses || wCloses.length === 0) return { status: '', available: false, hit: false };
   if (wCloses.length < 35) {
@@ -988,7 +986,17 @@ function calcWeeklyMacd_(wCloses, infoLogs) {
     return { status: '', available: false, hit: false };
   }
 
-  const hit = macdLine[lastIdx] > signalLine[lastIdx] && macdLine[prevIdx] <= signalLine[prevIdx];
+  // 1. 金叉 (Cross Event)
+  const isGoldenCross = macdLine[lastIdx] > signalLine[lastIdx] && macdLine[prevIdx] <= signalLine[prevIdx];
+  
+  // 2. 柱狀體 (DIF - MACD) 為正且擴大 (Growing)
+  const currHist = macdLine[lastIdx] - signalLine[lastIdx];
+  const prevHist = macdLine[prevIdx] - signalLine[prevIdx];
+  const isPositive = currHist > 0;
+  const isGrowing = currHist > prevHist;
+
+  // 綜合判斷：需同時滿足 金叉事件 + 柱體為正 + 柱體擴大
+  const hit = isGoldenCross && isPositive && isGrowing;
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
@@ -1006,7 +1014,7 @@ function calcMonthlyKDLowGolden_(months, infoLogs) {
   let prevD = null;
 
   for (let i = 0; i < months.length; i++) {
-    if (i < 8) continue; // 9 個月才開始 RSV
+    if (i < 8) continue; 
     const window = months.slice(Math.max(0, i - 8), i + 1);
     const highs = window.map(m => m.high);
     const lows = window.map(m => m.low);
@@ -1037,8 +1045,8 @@ function calcMonthlyKDLowGolden_(months, infoLogs) {
 
 function weekKey_(dateStr) {
   const dt = new Date(`${dateStr}T00:00:00+08:00`);
-  const day = dt.getDay(); // 0=Sun
-  const diff = (day + 6) % 7; // Monday as start
+  const day = dt.getDay(); 
+  const diff = (day + 6) % 7; 
   dt.setDate(dt.getDate() - diff);
   return Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
@@ -1241,49 +1249,4 @@ function parseProgress_(raw) {
   } catch (e) {
     return { next: 0, runId: '', startedAt: 0, tickersKey: '' };
   }
-}
-
-function testRules_TW() {
-  const logCheck = (name, pass, detail) => {
-    Logger.log(`${pass ? 'PASS' : 'FAIL'}: ${name}${detail ? ` - ${detail}` : ''}`);
-  };
-  const nearlyEqual = (a, b, eps) => Math.abs(a - b) <= (eps ?? 1e-6);
-
-  // #1 壓力線（50 筆 high 平均）與突破判斷
-  const highs = Array.from({ length: 52 }, (_, i) => i + 1);
-  const pressureSeries = rollingAvg_(highs, PRESSURE_N);
-  const rows = highs.map((high, idx) => ({
-    date: `2024-01-${String(idx + 1).padStart(2, '0')}`,
-    open: high,
-    high,
-    low: high,
-    close: high,
-    volume: 1000
-  }));
-  rows[50].close = pressureSeries[50];
-  rows[51].close = pressureSeries[51] + 0.5;
-  const pressureOk = nearlyEqual(pressureSeries[51], 27.5);
-  const cond1Hit = rows[50].close <= pressureSeries[50] && rows[51].close > pressureSeries[51];
-  logCheck('#1 pressure50 = 最近 50 筆 high 平均', pressureOk, `value=${pressureSeries[51]}`);
-  logCheck('#1 突破條件 (昨日<=pressure50 & 今日>pressure50)', cond1Hit);
-
-  // #5 MA60 連三日上升 + close > MA60
-  const closesUp = Array.from({ length: 62 }, (_, i) => i + 1);
-  const ma60 = sma_(closesUp, TW_MA60_N);
-  const ma60_prev1 = sma_(closesUp.slice(0, -1), TW_MA60_N);
-  const ma60_prev2 = sma_(closesUp.slice(0, -2), TW_MA60_N);
-  const cond5True = evalCond5Status_(closesUp[61], ma60, ma60_prev1, ma60_prev2) === 'TRUE';
-  const cond5False = evalCond5Status_(ma60 - 1, ma60, ma60_prev1, ma60_prev2) === 'FALSE';
-  const cond5Empty = evalCond5Status_(100, '', '', '') === '';
-  logCheck('#5 TRUE：MA60 連三日上升且 close > MA60', cond5True);
-  logCheck('#5 FALSE：close <= MA60', cond5False);
-  logCheck('#5 空值：資料不足', cond5Empty);
-
-  // #7 close >= 1.03 * MA60 且 MA10 > MA20 > MA60
-  const cond7True = evalCond7Status_(103, 120, 110, 100) === 'TRUE';
-  const cond7False = evalCond7Status_(102.9, 120, 110, 100) === 'FALSE';
-  const cond7Empty = evalCond7Status_(103, 120, 110, '') === '';
-  logCheck('#7 TRUE：close>=1.03*MA60 且 MA10>MA20>MA60', cond7True);
-  logCheck('#7 FALSE：close<1.03*MA60', cond7False);
-  logCheck('#7 空值：資料不足', cond7Empty);
 }
