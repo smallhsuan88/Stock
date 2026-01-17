@@ -144,6 +144,7 @@ let sortAsc = false;
 let latestDate = null;
 let showTechnicalData = false;
 let marketInfo = null;
+let holdingsMap = new Map();
 const POSITION_CAP_TOTAL = "position_cap_total";
 
 const DECISION_HEADERS = [
@@ -228,6 +229,16 @@ function looksLikeISODate(s){
   return /^\d{4}-\d{2}-\d{2}$/.test(String(s || "").trim());
 }
 
+function normalizeTickerKey(t){
+  const s = String(t ?? "").trim();
+  if (!s) return "";
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    return Number.isFinite(n) ? String(n) : s.replace(/^0+/, "");
+  }
+  return s.replace(/^0+/, "");
+}
+
 function normalizeRowToHeaders(headers, row){
   if (!row) return row;
 
@@ -282,11 +293,47 @@ function parseCap(value){
   return Number.isFinite(n) ? n : 0;
 }
 
+function parseCapNumber(value){
+  const s = String(value ?? "").trim();
+  if (!s) return NaN;
+  const n = parseFloat(s);
+  return Number.isNaN(n) ? NaN : n;
+}
+
 function formatCapTotal(row, colIndex){
   const total = parseCap(row[colIndex["position_cap"]])
     + parseCap(row[colIndex["position_cap2"]])
     + parseCap(row[colIndex["position_cap3"]]);
   return total.toFixed(2);
+}
+
+function getPositionCapTotalValue(row, colIndex){
+  const keys = ["position_cap", "position_cap2", "position_cap3"];
+  const totals = keys.map((key) => {
+    const raw = row[colIndex[key]];
+    const parsed = parseCapNumber(raw);
+    if (!Number.isFinite(parsed)) return NaN;
+    return String(raw ?? "").trim().endsWith("%") ? parsed / 100 : parsed;
+  });
+  if (!totals.some(Number.isFinite)) return NaN;
+  return totals.reduce((sum, value) => (Number.isFinite(value) ? sum + value : sum), 0);
+}
+
+function buildHoldingsMapFromConfig(text){
+  const data = parseCSV(text);
+  const configHeaders = data[0] || [];
+  const tickerIdx = configHeaders.indexOf("ticker");
+  const holdingIdx = configHeaders.indexOf("holding");
+  if (tickerIdx < 0 || holdingIdx < 0) return new Map();
+
+  const map = new Map();
+  for (let i = 1; i < data.length; i++){
+    const row = normalizeRowToHeaders(configHeaders, data[i]);
+    const key = normalizeTickerKey(row[tickerIdx]);
+    const value = String(row[holdingIdx] ?? "").trim();
+    if (key && value) map.set(key, value);
+  }
+  return map;
 }
 
 /** ✅ 重要修正：空字串不再變 0 */
@@ -540,12 +587,20 @@ function toVal(x){
 
 function sortRows(){
   const bIdx = idx("breakout");
+  const colIndex = buildColumnIndexMap(headers);
   rows.sort((a,b) => {
     const ab = (bIdx>=0 && String(a[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
     const bb = (bIdx>=0 && String(b[bIdx]).toUpperCase()==="TRUE") ? 1 : 0;
     if (ab !== bb) return bb - ab;
 
     if (sortKey === null) return 0;
+    if (sortKey === POSITION_CAP_TOTAL) {
+      const va = getPositionCapTotalValue(a, colIndex);
+      const vb = getPositionCapTotalValue(b, colIndex);
+      const na = Number.isFinite(va) ? va : -Infinity;
+      const nb = Number.isFinite(vb) ? vb : -Infinity;
+      return sortAsc ? na - nb : nb - na;
+    }
     const sortHeader = headers[sortKey]; // CHANGED: allow holding numeric sort.
     if (sortHeader === "holding") {
       const va = Number(a[sortKey]);
@@ -599,7 +654,9 @@ function render(){
     }
 
     const headerIdx = colIndex[h];
-    if (headerIdx !== undefined) {
+    if (h === POSITION_CAP_TOTAL) {
+      th.onclick = () => { sortKey = POSITION_CAP_TOTAL; sortAsc = !sortAsc; sortRows(); render(); };
+    } else if (headerIdx !== undefined) {
       th.onclick = () => { sortKey = headerIdx; sortAsc = !sortAsc; sortRows(); render(); };
     } else {
       th.style.cursor = "default";
@@ -616,6 +673,7 @@ function render(){
   const ri = idx("rsi_div_sellhalf");
   const ai = idx("action");
   const mpi = idx("bear_sell_plan");
+  const ti = idx("ticker");
 
   const marketRegime = getMarketRegime();
 
@@ -636,6 +694,10 @@ function render(){
       let displayValue = c;
       if (h === "date") {
         displayValue = formatDateCell(c);
+      } else if (h === "holding") {
+        const tickerKey = ti >= 0 ? normalizeTickerKey(r[ti]) : "";
+        const holdingValue = tickerKey ? holdingsMap.get(tickerKey) : undefined;
+        displayValue = holdingValue ?? "";
       } else if (h === POSITION_CAP_TOTAL) {
         displayValue = formatCapTotal(r, colIndex);
       }
@@ -769,9 +831,30 @@ function renderMarketGate(){
 
   rows = (signalsPayload.rows || []).map(r => normalizeRowToHeaders(headers, r));
 
+  const configCsvUrl = (typeof signalsPayload.config_csv_url === "string" ? signalsPayload.config_csv_url.trim() : "")
+    || (typeof CONFIG_TW_CSV_URL !== "undefined" ? String(CONFIG_TW_CSV_URL || "").trim() : "");
+
+  if (configCsvUrl) {
+    try {
+      const configRes = await fetch(configCsvUrl, { cache: "no-store" });
+      const configText = await configRes.text();
+      if (!isHTMLResponse(configText)) {
+        holdingsMap = buildHoldingsMapFromConfig(configText);
+      }
+    } catch (err) {
+      holdingsMap = new Map();
+    }
+  }
+
   latestDate = calcLatestDate();
 
   decorateRows();
+  const capIndex = buildColumnIndexMap(headers);
+  const hasCapTotal = rows.some(r => Number.isFinite(getPositionCapTotalValue(r, capIndex)));
+  if (hasCapTotal) {
+    sortKey = POSITION_CAP_TOTAL;
+    sortAsc = false;
+  }
   sortRows();
 
   const staleCount = (() => {
