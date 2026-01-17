@@ -73,14 +73,20 @@ const SIGNAL_HEADERS_MONTHLY = [
 ];
 
 function doGet(e) { // CHANGED: add signals API response routing.
-  const action = e && e.parameter ? String(e.parameter.action || '') : '';
+  const action = e && e.parameter && e.parameter.action ? String(e.parameter.action) : '';
   if (action === 'getSignalsTW') {
-    const payload = apiGetSignals_TW_(); // CHANGED: serve merged signals payload.
-    return ContentService
-      .createTextOutput(JSON.stringify(payload))
-      .setMimeType(ContentService.MimeType.JSON);
+    return getSignalsTW_();
   }
-  return HtmlService.createHtmlOutputFromFile('index');
+  const hint = 'missing action. Try: ?action=getSignalsTW';
+  return ContentService
+    .createTextOutput(hint)
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+function jsonOut_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function initSheets_TW() {
@@ -1110,6 +1116,37 @@ function buildConfigMap_TW_() { // CHANGED: build config map by header names.
     };
   }
   return map;
+}
+
+function getSignalsTW_() {
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const sig = ss.getSheetByName(SHEET_SIGNALS);
+    const cfg = ss.getSheetByName(SHEET_CONFIG);
+    if (!sig || !cfg) {
+      return jsonOut_({
+        ok: false,
+        error: 'Missing required sheet(s)',
+        where: 'getSignalsTW'
+      });
+    }
+    const payload = apiGetSignals_TW_();
+    return jsonOut_({
+      ok: true,
+      headers: payload.headers,
+      rows: payload.rows,
+      meta: {
+        rowCount: payload.rows.length
+      }
+    });
+  } catch (err) {
+    Logger.log(err);
+    return jsonOut_({
+      ok: false,
+      error: String(err),
+      where: 'getSignalsTW'
+    });
+  }
 }
 
 function apiGetSignals_TW_() { // CHANGED: merge config data into signals payload.
