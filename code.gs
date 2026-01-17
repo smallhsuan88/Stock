@@ -148,6 +148,11 @@ function runTW_MVP() {
     sigHeader = buildSignalHeaders_(existingSigHeader);
 
     if (next === 0) {
+      if (typeof toWeeklyBars_ !== 'function' || typeof toMonthlyBars_ !== 'function') {
+        log_(logBuffer, 'ERROR', '', 'Missing toWeeklyBars_ / toMonthlyBars_. Aborting before clearing Signals_TW.');
+        flushLogs_(logSheet, logBuffer);
+        return;
+      }
       sig.clearContents();
       sig.getRange(1, 1, 1, sigHeader.length).setValues([sigHeader]);
     } else if (sig.getLastRow() === 0) {
@@ -905,6 +910,98 @@ function weekKey_(dateStr) {
   const diff = (day + 6) % 7; 
   dt.setDate(dt.getDate() - diff);
   return Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+function toWeeklyBars_(rows) {
+  if (!rows || rows.length === 0) return [];
+  const out = [];
+  let currentKey = '';
+  let bucket = null;
+
+  rows.forEach(row => {
+    const key = weekKey_(row.date);
+    if (key !== currentKey) {
+      if (bucket) out.push(bucket);
+      currentKey = key;
+      bucket = {
+        date: key,
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        volume: row.volume
+      };
+    } else {
+      bucket.high = Math.max(bucket.high, row.high);
+      bucket.low = Math.min(bucket.low, row.low);
+      bucket.close = row.close;
+      bucket.volume += row.volume;
+    }
+  });
+  if (bucket) out.push(bucket);
+  return out;
+}
+
+function toMonthlyBars_(rows) {
+  if (!rows || rows.length === 0) return [];
+  const out = [];
+  let currentKey = '';
+  let bucket = null;
+
+  rows.forEach(row => {
+    const key = String(row.date).slice(0, 7);
+    if (key !== currentKey) {
+      if (bucket) out.push(bucket);
+      currentKey = key;
+      bucket = {
+        date: row.date,
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        volume: row.volume
+      };
+    } else {
+      bucket.high = Math.max(bucket.high, row.high);
+      bucket.low = Math.min(bucket.low, row.low);
+      bucket.close = row.close;
+      bucket.volume += row.volume;
+      bucket.date = row.date;
+    }
+  });
+  if (bucket) out.push(bucket);
+  return out;
+}
+
+function testBarsBuilder_TW() {
+  const rows = [
+    { date: '2024-01-29', open: 10, high: 12, low: 9, close: 11, volume: 100 },
+    { date: '2024-01-30', open: 11, high: 13, low: 10, close: 12, volume: 120 },
+    { date: '2024-01-31', open: 12, high: 14, low: 11, close: 13, volume: 140 },
+    { date: '2024-02-01', open: 13, high: 15, low: 12, close: 14, volume: 160 },
+    { date: '2024-02-02', open: 14, high: 16, low: 13, close: 15, volume: 180 },
+    { date: '2024-02-05', open: 15, high: 17, low: 14, close: 16, volume: 200 },
+    { date: '2024-02-06', open: 16, high: 18, low: 15, close: 17, volume: 220 },
+    { date: '2024-02-07', open: 17, high: 19, low: 16, close: 18, volume: 240 },
+    { date: '2024-02-08', open: 18, high: 20, low: 17, close: 19, volume: 260 },
+    { date: '2024-02-09', open: 19, high: 21, low: 18, close: 20, volume: 280 },
+    { date: '2024-02-12', open: 20, high: 22, low: 19, close: 21, volume: 300 }
+  ];
+
+  const weeks = toWeeklyBars_(rows);
+  const months = toMonthlyBars_(rows);
+
+  Logger.log(`Weeks=${weeks.length}, Months=${months.length}`);
+  if (weeks.length) {
+    Logger.log(`Week1 open=${weeks[0].open}, close=${weeks[0].close}, high=${weeks[0].high}, low=${weeks[0].low}`);
+    const lastWeek = weeks[weeks.length - 1];
+    Logger.log(`Last week close=${lastWeek.close}`);
+  }
+  if (months.length) {
+    Logger.log(`Month1 open=${months[0].open}, close=${months[0].close}, high=${months[0].high}, low=${months[0].low}`);
+    const lastMonth = months[months.length - 1];
+    Logger.log(`Last month close=${lastMonth.close}`);
+  }
 }
 
 function parseNum_(s) {
