@@ -1,12 +1,12 @@
 /** =========================
- * TW MVP - Stable Version (Optimized for Rule #11)
+ * TW MVP - Turbo Version (Incremental Fetch)
  * - Source: TWSE STOCK_DAY (monthly)
- * - Output: Raw_TW + Signals_TW + Log
+ * - Optimization: Fetches only missing months if data exists
  * - Rule #1 (Pressure50): State-based (Close > Pressure)
  * - Rule #4 (Neckline): State-based (Close > Neckline)
  * - Rule #7 (MA Align): Strict MA10 > MA20 > MA60
  * - Rule #8 (MACD): Golden Cross + Histogram Growing
- * - Rule #11 (Month KD): State-based (K > D AND D < 60) [FIXED]
+ * - Rule #11 (Month KD): State-based (K > D AND D < 60)
  * ========================= **/
 
 const SHEET_CONFIG  = 'Config_TW';
@@ -14,8 +14,7 @@ const SHEET_RAW     = 'Raw_TW';
 const SHEET_SIGNALS = 'Signals_TW';
 const SHEET_LOG     = 'Log';
 
-// 修正 1: 回測月份改為 24，讓月 KD 有兩年的數據可運算收斂
-const LOOKBACK_MONTHS = 24; 
+const LOOKBACK_MONTHS = 24; // 兩年資料，用於月 KD 收斂
 
 const HIGH_N    = 40;
 const PRESSURE_N = 50;
@@ -27,7 +26,7 @@ const RESLINE_EPS = 0.005;
 const NECKLINE_TOLERANCE = 0.005;
 const NECKLINE_EPS = 0.005;
 
-const SLEEP_MS_EACH_TICKER = 250; 
+const SLEEP_MS_EACH_TICKER = 100; // 有快取後可稍微縮短
 
 const TIME_BUDGET_MS = 330000; 
 const CHUNK_MIN_LEFT_MS = 15000; 
@@ -73,10 +72,8 @@ const SIGNAL_HEADERS_MONTHLY = [
   'exit_note'
 ];
 
-/** 初始化 Sheets */
 function initSheets_TW() {
   const ss = SpreadsheetApp.getActive();
-
   const raw = getOrCreateSheet_(ss, SHEET_RAW);
   const sig = getOrCreateSheet_(ss, SHEET_SIGNALS);
   const log = getOrCreateSheet_(ss, SHEET_LOG);
@@ -92,7 +89,6 @@ function initSheets_TW() {
   }
 }
 
-/** 每天收盤後跑 */
 function runTW_MVP() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
@@ -101,13 +97,14 @@ function runTW_MVP() {
   const props = PropertiesService.getScriptProperties();
   const logBuffer = [];
   const signalsRows = [];
-  const newRawRows = [];
-  const tickersToUpdate = new Set();
+  
+  // 這裡改用 Map 儲存新抓到的所有資料 (Key: Ticker)，用於最後回寫 Raw
+  const processedRawData = new Map(); 
+  
   let raw = null;
   let sig = null;
   let logSheet = null;
   let rawHeader = null;
-  let rawExistingRows = null;
   let sigHeader = null;
 
   try {
@@ -123,6 +120,9 @@ function runTW_MVP() {
       return;
     }
 
+    // 1. 預先讀取 Raw_TW 現有資料建立 Cache (加速的核心)
+    const rawDataMap = loadRawDataToMap_(raw);
+
     const tickersKey = tickers.join(',');
     let progress = parseProgress_(props.getProperty(PROP_KEY));
     const nowMs = Date.now();
@@ -137,23 +137,17 @@ function runTW_MVP() {
       startedAt = nowMs;
     }
 
-    props.setProperty(PROP_KEY, JSON.stringify({
-      next,
-      runId,
-      startedAt,
-      tickersKey
-    }));
+    props.setProperty(PROP_KEY, JSON.stringify({ next, runId, startedAt, tickersKey }));
 
     const rawValues = raw.getLastRow() > 0 ? raw.getDataRange().getValues() : [];
-    rawHeader = rawValues.length
-      ? rawValues[0]
-      : ['ticker','date','open','high','low','close','volume'];
-    rawExistingRows = rawValues.length > 1 ? rawValues.slice(1) : [];
+    rawHeader = rawValues.length ? rawValues[0] : ['ticker','date','open','high','low','close','volume'];
 
     const existingSigHeader = sig.getLastRow() > 0
       ? sig.getRange(1, 1, 1, sig.getLastColumn()).getValues()[0].filter(v => String(v).trim() !== '')
       : [];
     sigHeader = buildSignalHeaders_(existingSigHeader);
+
+    // 若是新的一輪 (next=0)，清空 Signals 表
     if (next === 0) {
       sig.clearContents();
       sig.getRange(1, 1, 1, sigHeader.length).setValues([sigHeader]);
@@ -161,24 +155,30 @@ function runTW_MVP() {
       sig.getRange(1, 1, 1, sigHeader.length).setValues([sigHeader]);
     }
 
-    log_(logBuffer, 'INFO', '', `Run started. runId=${runId} tickers=${tickers.length}, months=${LOOKBACK_MONTHS}, next=${next}`);
+    log_(logBuffer, 'INFO', '', `Run started. RunID=${runId} Tickers=${tickers.length}, StartIdx=${next}`);
 
     for (let i = next; i < tickers.length; i++) {
       const ticker = tickers[i];
       try {
-        const rows = fetchTWSEStockDayMonths_(ticker, LOOKBACK_MONTHS); // asc by date
-        if (!rows.length) {
-          log_(logBuffer, 'WARN', ticker, 'No rows fetched (maybe ETF/OTC or API empty)');
+        // 從 Cache 拿舊資料
+        const existingRows = rawDataMap.get(ticker) || [];
+        
+        // 智慧抓取：只抓缺少的月份
+        const { rows: mergedRows, fetchedCount } = fetchSmartTWSEData_(ticker, existingRows, LOOKBACK_MONTHS);
+        
+        if (!mergedRows.length) {
+          log_(logBuffer, 'WARN', ticker, 'No data (ETF/OTC/API Empty)');
         } else {
-          tickersToUpdate.add(ticker);
-          rows.forEach(r => newRawRows.push([ticker, r.date, r.open, r.high, r.low, r.close, r.volume]));
+          // 保存合併後的資料，稍後寫回 Raw
+          processedRawData.set(ticker, mergedRows);
 
-          const calc = calcSignalsFromRows_(rows);
+          // 計算指標
+          const calc = calcSignalsFromRows_(mergedRows);
           signalsRows.push(buildSignalRow_(sigHeader, calc, ticker));
 
           log_(logBuffer, 'INFO', ticker,
-            `OK ${calc.date} breakout=${calc.breakout} ` +
-            `vol_ratio=${num_(calc.vol_ratio,2)} rsi=${num_(calc.rsi14,1)} adx=${num_(calc.adx14,1)}`
+            `OK ${calc.date} (Fetched ${fetchedCount}m) ` +
+            `MA60=${num_(calc.ma60,1)} Breakout=${calc.breakout}`
           );
           if (calc.infoLogs && calc.infoLogs.length) {
             calc.infoLogs.forEach(msg => log_(logBuffer, 'INFO', ticker, msg));
@@ -190,6 +190,7 @@ function runTW_MVP() {
         Utilities.sleep(SLEEP_MS_EACH_TICKER);
       }
 
+      // Time Budget Check
       if (Date.now() - runStartMs > TIME_BUDGET_MS - CHUNK_MIN_LEFT_MS) {
         props.setProperty(PROP_KEY, JSON.stringify({
           next: i + 1,
@@ -199,12 +200,17 @@ function runTW_MVP() {
         }));
         scheduleNextRun_(props);
         log_(logBuffer, 'INFO', '', `Paused & scheduled next run. next=${i + 1}`);
+        // 暫停前先存檔
+        flushLogs_(logSheet, logBuffer);
+        flushSignals_(sig, signalsRows, sigHeader);
+        flushSmartRaw_(raw, rawHeader, rawDataMap, processedRawData); // 關鍵：混合寫入
         return;
       }
     }
 
+    // 跑完所有股票
     const secs = Math.round((Date.now() - runStartMs) / 1000);
-    log_(logBuffer, 'INFO', '', `Run finished. seconds=${secs}`);
+    log_(logBuffer, 'INFO', '', `Run finished. Total seconds=${secs}`);
     props.deleteProperty(PROP_KEY);
     props.deleteProperty(PROP_TRIGGER_AT);
 
@@ -213,12 +219,177 @@ function runTW_MVP() {
   } finally {
     if (sig && sigHeader) flushSignals_(sig, signalsRows, sigHeader);
     if (logSheet) flushLogs_(logSheet, logBuffer);
-    if (raw && rawHeader && rawExistingRows) {
-      flushRaw_(raw, rawHeader, rawExistingRows, tickersToUpdate, newRawRows);
+    if (raw && rawHeader) {
+      // 這裡需要用特殊的 flush 邏輯：保留沒處理到的 ticker，更新已處理的 ticker
+      flushSmartRaw_(raw, rawHeader, rawDataMap, processedRawData);
     }
     lock.releaseLock();
   }
 }
+
+/** 讀取 Raw Sheet 全部資料到 Map<Ticker, Rows[]> */
+function loadRawDataToMap_(sheet) {
+  const map = new Map();
+  if (sheet.getLastRow() <= 1) return map;
+  
+  const values = sheet.getDataRange().getValues();
+  // row[0]=ticker, row[1]=date (yyyy-MM-dd), ...
+  // headers: ticker,date,open,high,low,close,volume
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const t = String(row[0]).trim();
+    if (!t) continue;
+    
+    if (!map.has(t)) map.set(t, []);
+    // 轉為物件格式方便操作，保留原始 row 結構也行，這裡轉物件比較安全
+    map.get(t).push({
+      date: formatDateISO_(row[1]),
+      open: Number(row[2]),
+      high: Number(row[3]),
+      low: Number(row[4]),
+      close: Number(row[5]),
+      volume: Number(row[6])
+    });
+  }
+  
+  // 確保每個 Ticker 內的日期是排序的
+  for (const [k, rows] of map) {
+    rows.sort((a,b) => a.date.localeCompare(b.date));
+  }
+  return map;
+}
+
+/** 智慧抓取：比較舊資料，只抓缺少的月份 */
+function fetchSmartTWSEData_(ticker, existingRows, lookbackMonths) {
+  const now = new Date();
+  const neededStart = new Date(now.getFullYear(), now.getMonth() - lookbackMonths, 1);
+  const neededStartStr = Utilities.formatDate(neededStart, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  
+  let fetchStartDate = neededStart;
+  
+  // 檢查現有資料最後一筆
+  if (existingRows.length > 0) {
+    const lastRow = existingRows[existingRows.length - 1];
+    const lastDate = new Date(lastRow.date);
+    
+    // 如果舊資料最後一天已經是這個月或之後，可能只需要更新這個月
+    // 為了保險起見，我們從「最後一筆資料的月份」開始抓，確保該月資料完整
+    // 例如最後一筆是 2024-05-15，我們重抓 2024-05 整月，補齊後面日期
+    fetchStartDate = new Date(lastDate.getFullYear(), lastDate.getMonth(), 1);
+    
+    // 如果計算出的 fetchStartDate 比 neededStart 還早，就用 neededStart (不需要那麼早的)
+    if (fetchStartDate < neededStart) fetchStartDate = neededStart;
+  }
+
+  // 計算需要抓取的月份列表
+  const monthsToFetch = [];
+  let curr = new Date(fetchStartDate);
+  const end = new Date(now.getFullYear(), now.getMonth(), 1); // 到本月1號
+  
+  while (curr <= end) {
+    monthsToFetch.push({
+      y: curr.getFullYear(),
+      m: String(curr.getMonth() + 1).padStart(2, '0')
+    });
+    // 下個月
+    curr = new Date(curr.getFullYear(), curr.getMonth() + 1, 1);
+  }
+  
+  // 實際抓取
+  let newFetchedRows = [];
+  for (const ym of monthsToFetch) {
+    const data = fetchTWSEMonthData_(ticker, ym.y, ym.m);
+    if (data) {
+       data.forEach(arr => {
+        const dateISO = rocToISO_(arr[0]);
+        if (!dateISO) return;
+        const volume = safeVolume_(arr);
+        const close = parseNum_(arr[6]);
+        if (isFinite(close) && close > 0) {
+          newFetchedRows.push({
+            date: dateISO,
+            open: parseNum_(arr[3]),
+            high: parseNum_(arr[4]),
+            low: parseNum_(arr[5]),
+            close: close,
+            volume: volume
+          });
+        }
+      });
+    }
+    // 避免太快
+    Utilities.sleep(150); 
+  }
+
+  // 合併邏輯：
+  // 1. 過濾掉 existingRows 中太舊的 (比 lookback 舊的)
+  // 2. 過濾掉 existingRows 中日期 >= newFetchedRows 最小日期的 (因為新抓的比較準)
+  // 3. 組合
+  
+  const minNewDate = newFetchedRows.length > 0 ? newFetchedRows[0].date : '9999-99-99';
+  
+  const keepOld = existingRows.filter(r => r.date >= neededStartStr && r.date < minNewDate);
+  const combined = keepOld.concat(newFetchedRows);
+  
+  // 再次排序 + 去重 (以防萬一)
+  combined.sort((a,b) => a.date.localeCompare(b.date));
+  
+  const dedup = [];
+  const seen = new Set();
+  for (const r of combined) {
+    if (seen.has(r.date)) continue;
+    seen.add(r.date);
+    dedup.push(r);
+  }
+
+  return { rows: dedup, fetchedCount: monthsToFetch.length };
+}
+
+
+/** 聰明回寫：保留未處理的 Ticker，更新已處理的 Ticker */
+function flushSmartRaw_(sheet, header, originalMap, processedMap) {
+  // processedMap 包含這次執行有更新到的 ticker
+  // originalMap 包含所有原始資料
+  
+  // 我們需要將 processedMap 的內容更新回 originalMap
+  for (const [ticker, rows] of processedMap) {
+    originalMap.set(ticker, rows);
+  }
+  
+  // 轉成 Array 準備寫入
+  const output = [];
+  // 根據 Config 的順序或 Map 的順序都行，這裡簡單遍歷 Map
+  // 為了美觀，可以稍微排個序
+  const sortedTickers = Array.from(originalMap.keys()).sort();
+  
+  for (const t of sortedTickers) {
+    const rows = originalMap.get(t);
+    rows.forEach(r => {
+      output.push([t, r.date, r.open, r.high, r.low, r.close, r.volume]);
+    });
+  }
+  
+  if (output.length === 0) return;
+
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, header.length).setValues([header]);
+  
+  // 批次寫入
+  const batchSize = 5000;
+  for (let i = 0; i < output.length; i += batchSize) {
+    const batch = output.slice(i, i + batchSize);
+    sheet.getRange(2 + i, 1, batch.length, header.length).setValues(batch);
+  }
+}
+
+function formatDateISO_(dateObj) {
+  if (dateObj instanceof Date) {
+    return Utilities.formatDate(dateObj, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  return String(dateObj);
+}
+
+// --- 以下維持原本的輔助函數與指標計算邏輯 (Rules) ---
 
 function readTickers_(cfgSheet) {
   const values = cfgSheet.getDataRange().getValues();
@@ -231,44 +402,6 @@ function readTickers_(cfgSheet) {
     out.push(t);
   }
   return out;
-}
-
-function fetchTWSEStockDayMonths_(ticker, monthsBack) {
-  const now = new Date();
-  let all = [];
-
-  for (let m = 0; m < monthsBack; m++) {
-    const d = new Date(now.getFullYear(), now.getMonth() - m, 1);
-    const y = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const data = fetchTWSEMonthData_(ticker, y, mm);
-    if (!data) continue;
-
-    data.forEach(arr => {
-      const dateISO = rocToISO_(arr[0]);
-      if (!dateISO) return;
-
-      const volume = safeVolume_(arr);
-      const open  = parseNum_(arr[3]);
-      const high  = parseNum_(arr[4]);
-      const low   = parseNum_(arr[5]);
-      const close = parseNum_(arr[6]);
-
-      if (!isFinite(close) || close <= 0) return;
-
-      all.push({ date: dateISO, open, high, low, close, volume });
-    });
-  }
-
-  all.sort((a,b) => a.date.localeCompare(b.date));
-  const dedup = [];
-  const seen = new Set();
-  for (const r of all) {
-    if (seen.has(r.date)) continue;
-    seen.add(r.date);
-    dedup.push(r);
-  }
-  return dedup;
 }
 
 function fetchTWSEMonthData_(ticker, year, mm) {
@@ -287,10 +420,12 @@ function fetchTWSEMonthData_(ticker, year, mm) {
       const text = resp.getContentText();
       const json = JSON.parse(text);
       if (!json || !json.data || !Array.isArray(json.data)) {
-        throw new Error('Invalid JSON payload');
+        // 有些月份可能真的沒資料或休市
+        return []; 
       }
       if (json.stat && json.stat !== 'OK') {
-        throw new Error(`stat=${json.stat}`);
+        // stat 不 OK 可能是查詢過於頻繁或無資料
+        return [];
       }
       return json.data;
     } catch (e) {
@@ -299,7 +434,6 @@ function fetchTWSEMonthData_(ticker, year, mm) {
       }
     }
   }
-
   return null;
 }
 
@@ -311,27 +445,6 @@ function safeVolume_(arr) {
     if (v > 1000) return v;
   }
   return 0;
-}
-
-function flushRaw_(rawSheet, header, existingRows, tickersToUpdate, newRows) {
-  if (!tickersToUpdate.size) return;
-
-  const merged = existingRows.filter(row => {
-    const key = String(row[0] || '').trim();
-    if (!key) return true;
-    return !tickersToUpdate.has(key);
-  }).concat(newRows);
-
-  rawSheet.clearContents();
-  rawSheet.getRange(1, 1, 1, header.length).setValues([header]);
-
-  if (!merged.length) return;
-
-  const batchSize = 5000;
-  for (let i = 0; i < merged.length; i += batchSize) {
-    const batch = merged.slice(i, i + batchSize);
-    rawSheet.getRange(2 + i, 1, batch.length, header.length).setValues(batch);
-  }
 }
 
 /** 計算 signals */
@@ -437,7 +550,7 @@ function calcSignalsFromRows_(rows) {
     m_price_vol_up = (priceUp && volUp) ? 'TRUE' : 'FALSE';
   }
 
-  // 規則 #11: 月 KD (修正版)
+  // 規則 #11: 月 KD (State-based)
   const mkd = calcMonthlyKDLowGolden_(months, infoLogs);
   const m_kd_low_golden = mkd.status;
 
@@ -626,8 +739,6 @@ function calcSignalsFromRows_(rows) {
   };
 }
 
-/** ===== Indicators ===== */
-
 function rollingAvg_(arr, win) {
   if (!arr || arr.length < win) return new Array(arr ? arr.length : 0).fill('');
   const out = new Array(arr.length).fill('');
@@ -652,7 +763,6 @@ function evalCond5Status_(close, ma60, ma60_prev1, ma60_prev2) {
   return (close > ma60 && ma60 > ma60_prev1 && ma60_prev1 > ma60_prev2) ? 'TRUE' : 'FALSE';
 }
 
-// 規則 #7 修正: 強制轉型並確認 MA10 > MA20 > MA60
 function evalCond7Status_(close, ma10, ma20, ma60) {
   if (!isFiniteNum_(close) || !isFiniteNum_(ma10) || !isFiniteNum_(ma20) || !isFiniteNum_(ma60)) return '';
   
@@ -834,7 +944,6 @@ function calcBreakResline60_(highs, lastClose, n, infoLogs) {
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
-// 規則 #4 修正: State (Close > Neckline)
 function calcNeckline60_(closes, lastClose, n, infoLogs) {
   if (n < TW_MA60_N) {
     infoLogs.push('neckline60 skipped: need >= 60 days');
@@ -872,7 +981,6 @@ function calcNeckline60_(closes, lastClose, n, infoLogs) {
   }
 
   const neckline = best.center;
-  // 修正處：只要收盤大於頸線(加一點緩衝)即視為達成
   const hit = lastClose > neckline * (1 + NECKLINE_EPS);
 
   return {
@@ -972,7 +1080,6 @@ function calcWeeklyKDG_(weeks, infoLogs) {
   return { status: golden ? 'TRUE' : 'FALSE', available: true, hit: golden };
 }
 
-// 規則 #8 修正: 週 MACD 金叉 + 柱狀體擴大
 function calcWeeklyMacd_(wCloses, infoLogs) {
   if (!wCloses || wCloses.length === 0) return { status: '', available: false, hit: false };
   if (wCloses.length < 35) {
@@ -992,26 +1099,21 @@ function calcWeeklyMacd_(wCloses, infoLogs) {
     return { status: '', available: false, hit: false };
   }
 
-  // 1. 金叉 (Cross Event)
   const isGoldenCross = macdLine[lastIdx] > signalLine[lastIdx] && macdLine[prevIdx] <= signalLine[prevIdx];
   
-  // 2. 柱狀體 (DIF - MACD) 為正且擴大 (Growing)
   const currHist = macdLine[lastIdx] - signalLine[lastIdx];
   const prevHist = macdLine[prevIdx] - signalLine[prevIdx];
   const isPositive = currHist > 0;
   const isGrowing = currHist > prevHist;
 
-  // 綜合判斷：需同時滿足 金叉事件 + 柱體為正 + 柱體擴大
   const hit = isGoldenCross && isPositive && isGrowing;
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
-// 規則 #11 修正: 狀態判定 (State)
-// 修正 2: 只要 K > D 且 D < 60 即符合
+// 規則 #11: State (K > D AND D < 60)
 function calcMonthlyKDLowGolden_(months, infoLogs) {
   if (!months || months.length === 0) return { status: '', available: false, hit: false };
 
-  // 因應 LOOKBACK_MONTHS 增加，這裡的防呆也要調整，至少要有足夠數據才能算
   if (months.length < 15) {
     infoLogs.push(`m_kd_low_golden skipped: insufficient history (have ${months.length})`);
     return { status: '', available: false, hit: false };
@@ -1020,9 +1122,8 @@ function calcMonthlyKDLowGolden_(months, infoLogs) {
   let K = 50;
   let D = 50;
 
-  // 標準 KD 算法
   for (let i = 0; i < months.length; i++) {
-    if (i < 8) continue; // 前 9 個月 (idx 0-8) 累積數據
+    if (i < 8) continue; 
     const window = months.slice(Math.max(0, i - 8), i + 1);
     const highs = window.map(m => m.high);
     const lows = window.map(m => m.low);
@@ -1031,7 +1132,6 @@ function calcMonthlyKDLowGolden_(months, infoLogs) {
     const highestHigh = Math.max(...highs);
     const lowestLow = Math.min(...lows);
     
-    // 防呆：若最高=最低，RSV 設 50
     let RSV = 50;
     if (highestHigh !== lowestLow) {
       RSV = (close - lowestLow) / (highestHigh - lowestLow) * 100;
@@ -1041,9 +1141,8 @@ function calcMonthlyKDLowGolden_(months, infoLogs) {
     D = (2 / 3) * D + (1 / 3) * K;
   }
 
-  // 修正邏輯：只要 (K > D) 且 (D < 60)
   const goldenState = (K > D);
-  const lowBand = (D < 60); // 用戶指定 D < 60 即可
+  const lowBand = (D < 60); 
   
   const hit = goldenState && lowBand;
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
@@ -1056,8 +1155,6 @@ function weekKey_(dateStr) {
   dt.setDate(dt.getDate() - diff);
   return Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
-
-/** ===== Utils ===== */
 
 function parseNum_(s) {
   const x = String(s ?? '').replace(/,/g,'').trim();
