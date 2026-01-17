@@ -144,6 +144,7 @@ let sortAsc = false;
 let latestDate = null;
 let showTechnicalData = false;
 let marketInfo = null;
+const POSITION_CAP_TOTAL = "position_cap_total";
 
 const DECISION_HEADERS = [
   "adx_state",
@@ -253,6 +254,10 @@ function normalizeRowToHeaders(headers, row){
 
 function idx(name){ return headers.indexOf(name); }
 
+function buildColumnIndexMap(list){
+  return Object.fromEntries(list.map((h, i) => [h, i]));
+}
+
 function num(x){
   const n = Number(String(x ?? "").replace(/,/g,"").trim());
   return Number.isFinite(n) ? n : NaN;
@@ -260,6 +265,29 @@ function num(x){
 
 function boolTrue(x){ return String(x).toUpperCase() === "TRUE"; }
 function isOKNum(x){ return Number.isFinite(x); }
+
+function formatDateCell(value){
+  const s = String(value || "");
+  return s.length >= 10 ? s.slice(0, 10) : s;
+}
+
+function parseCap(value){
+  const s = String(value || "").trim();
+  if (!s) return 0;
+  if (s.endsWith("%")) {
+    const n = Number(s.slice(0, -1));
+    return Number.isFinite(n) ? n / 100 : 0;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function formatCapTotal(row, colIndex){
+  const total = parseCap(row[colIndex["position_cap"]])
+    + parseCap(row[colIndex["position_cap2"]])
+    + parseCap(row[colIndex["position_cap3"]]);
+  return total.toFixed(2);
+}
 
 /** ✅ 重要修正：空字串不再變 0 */
 function toIntOrNull(x){
@@ -490,6 +518,12 @@ function getDisplayHeaders(){
     visibleCore = visibleCore.concat(BEAR_HEADERS);
   }
 
+  const capIdx = visibleCore.indexOf("position_cap3");
+  if (capIdx >= 0 && !visibleCore.includes(POSITION_CAP_TOTAL)) {
+    visibleCore = visibleCore.slice();
+    visibleCore.splice(capIdx + 1, 0, POSITION_CAP_TOTAL);
+  }
+
   // 3) 技術欄：把已經放進 visibleCore 的移除掉，避免重複
   if (showTechnicalData){
     const coreSet = new Set(visibleCore);
@@ -547,6 +581,7 @@ function render(){
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
   const displayHeaders = getDisplayHeaders();
+  const colIndex = buildColumnIndexMap(headers);
   displayHeaders.forEach(h => {
     const th = document.createElement("th");
     th.textContent = h;
@@ -563,8 +598,12 @@ function render(){
       th.appendChild(note);
     }
 
-    const headerIdx = idx(h);
-    th.onclick = () => { sortKey = headerIdx; sortAsc = !sortAsc; sortRows(); render(); };
+    const headerIdx = colIndex[h];
+    if (headerIdx !== undefined) {
+      th.onclick = () => { sortKey = headerIdx; sortAsc = !sortAsc; sortRows(); render(); };
+    } else {
+      th.style.cursor = "default";
+    }
     trh.appendChild(th);
   });
   thead.appendChild(trh);
@@ -590,10 +629,17 @@ function render(){
     if (latestDate && d && d < latestDate) tr.classList.add("stale");
 
     displayHeaders.forEach(h => {
-      const colIdx = idx(h);
-      const c = r[colIdx];
+      const colIdx = colIndex[h];
+      const c = colIdx !== undefined ? r[colIdx] : "";
       const td = document.createElement("td");
-      td.textContent = c;
+
+      let displayValue = c;
+      if (h === "date") {
+        displayValue = formatDateCell(c);
+      } else if (h === POSITION_CAP_TOTAL) {
+        displayValue = formatCapTotal(r, colIndex);
+      }
+      td.textContent = displayValue ?? "";
 
       if (colIdx === oi && String(c).toUpperCase()==="TRUE") td.className = "warn";
       if (colIdx === ri && String(c).toUpperCase()==="TRUE") td.className = "warn";
