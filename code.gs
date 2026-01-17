@@ -1,8 +1,8 @@
 /** =========================
- * TW MVP - Turbo Version (Final)
+ * TW MVP - Turbo Version (Fix: Scope Error)
  * - Optimization: Incremental Fetch
  * - Rule #1 (Pressure50): State (Close > Pressure)
- * - Rule #3 (Week KD): K > D AND Cross within last 4 weeks [NEW]
+ * - Rule #3 (Week KD): K > D AND Cross within last 4 weeks
  * - Rule #4 (Neckline): State (Close > Neckline)
  * - Rule #7 (MA Align): Strict MA10 > MA20 > MA60
  * - Rule #8 (MACD): Golden Cross + Histogram Growing
@@ -99,6 +99,8 @@ function runTW_MVP() {
   const signalsRows = [];
   const processedRawData = new Map(); 
   
+  // 修正：將變數宣告移至 try 區塊外，確保 finally 區塊讀得到
+  let rawDataMap = null; 
   let raw = null;
   let sig = null;
   let logSheet = null;
@@ -118,7 +120,9 @@ function runTW_MVP() {
       return;
     }
 
-    const rawDataMap = loadRawDataToMap_(raw);
+    // 修正：這裡直接賦值，不再用 const 宣告
+    rawDataMap = loadRawDataToMap_(raw);
+    
     const tickersKey = tickers.join(',');
     let progress = parseProgress_(props.getProperty(PROP_KEY));
     const nowMs = Date.now();
@@ -190,6 +194,7 @@ function runTW_MVP() {
         log_(logBuffer, 'INFO', '', `Paused & scheduled next run. next=${i + 1}`);
         flushLogs_(logSheet, logBuffer);
         flushSignals_(sig, signalsRows, sigHeader);
+        // 這裡 rawDataMap 是可見的
         flushSmartRaw_(raw, rawHeader, rawDataMap, processedRawData);
         return;
       }
@@ -205,7 +210,8 @@ function runTW_MVP() {
   } finally {
     if (sig && sigHeader) flushSignals_(sig, signalsRows, sigHeader);
     if (logSheet) flushLogs_(logSheet, logBuffer);
-    if (raw && rawHeader) {
+    // 修正：增加 rawDataMap 是否存在的檢查
+    if (raw && rawHeader && rawDataMap) {
       flushSmartRaw_(raw, rawHeader, rawDataMap, processedRawData);
     }
     lock.releaseLock();
@@ -798,7 +804,6 @@ function calcWeeklyKDG_(weeks, infoLogs) {
 
   let K = 50;
   let D = 50;
-  // 用來記錄歷史 K, D，方便檢查交叉時間
   const kdHistory = []; 
 
   for (let i = 0; i < weeks.length; i++) {
@@ -820,24 +825,19 @@ function calcWeeklyKDG_(weeks, infoLogs) {
     kdHistory.push({ k: K, d: D });
   }
 
-  // 1. 檢查本週是否 K > D (多頭狀態)
+  // 1. 本週必須是多頭 (K > D)
   const current = kdHistory.length > 0 ? kdHistory[kdHistory.length - 1] : null;
   if (!current || current.k <= current.d) {
     return { status: 'FALSE', available: true, hit: false };
   }
 
-  // 2. 檢查過去 4 週內是否有 K <= D (發生過金叉)
-  // kdHistory 最後一個是本週 (index: length-1)
-  // 我們要檢查 index: length-2 (1週前), length-3 (2週前), length-4 (3週前), length-5 (4週前)
-  // 只要其中一個 K <= D，代表金叉是在這 4 週內發生的
-  
+  // 2. 過去 4 週內曾發生金叉 (檢查 1~4 週前是否有 K<=D)
   const historyLen = kdHistory.length;
-  // 檢查範圍：過去 1~4 週 (若歷史資料夠長)
   const lookbackBars = 4;
   let crossHappenedRecently = false;
 
   for (let j = 1; j <= lookbackBars; j++) {
-    const idx = historyLen - 1 - j; // -1 是本週, 再 -j 是前幾週
+    const idx = historyLen - 1 - j;
     if (idx >= 0) {
       const prev = kdHistory[idx];
       if (prev.k <= prev.d) {
@@ -847,9 +847,8 @@ function calcWeeklyKDG_(weeks, infoLogs) {
     }
   }
 
-  // 修正邏輯：必須現在是多頭 (K>D) 且 金叉發生在 4 週內
+  // Hit = 目前多頭 且 金叉發生在4週內
   const hit = crossHappenedRecently; 
-  
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
