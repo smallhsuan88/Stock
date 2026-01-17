@@ -1,9 +1,12 @@
 /** =========================
- * TW MVP - Stable Version (Final Refine)
+ * TW MVP - Stable Version (Optimized for Rule #11)
+ * - Source: TWSE STOCK_DAY (monthly)
+ * - Output: Raw_TW + Signals_TW + Log
  * - Rule #1 (Pressure50): State-based (Close > Pressure)
- * - Rule #4 (Neckline): State-based (Close > Neckline) [FIXED]
+ * - Rule #4 (Neckline): State-based (Close > Neckline)
  * - Rule #7 (MA Align): Strict MA10 > MA20 > MA60
  * - Rule #8 (MACD): Golden Cross + Histogram Growing
+ * - Rule #11 (Month KD): State-based (K > D AND D < 60) [FIXED]
  * ========================= **/
 
 const SHEET_CONFIG  = 'Config_TW';
@@ -11,7 +14,9 @@ const SHEET_RAW     = 'Raw_TW';
 const SHEET_SIGNALS = 'Signals_TW';
 const SHEET_LOG     = 'Log';
 
-const LOOKBACK_MONTHS = 18;
+// 修正 1: 回測月份改為 24，讓月 KD 有兩年的數據可運算收斂
+const LOOKBACK_MONTHS = 24; 
+
 const HIGH_N    = 40;
 const PRESSURE_N = 50;
 const VOL_MA_N = 20;
@@ -432,6 +437,7 @@ function calcSignalsFromRows_(rows) {
     m_price_vol_up = (priceUp && volUp) ? 'TRUE' : 'FALSE';
   }
 
+  // 規則 #11: 月 KD (修正版)
   const mkd = calcMonthlyKDLowGolden_(months, infoLogs);
   const m_kd_low_golden = mkd.status;
 
@@ -866,7 +872,7 @@ function calcNeckline60_(closes, lastClose, n, infoLogs) {
   }
 
   const neckline = best.center;
-  // 修正處：只要收盤大於頸線(加一點緩衝)即視為達成，不再檢查昨日是否在頸線下
+  // 修正處：只要收盤大於頸線(加一點緩衝)即視為達成
   const hit = lastClose > neckline * (1 + NECKLINE_EPS);
 
   return {
@@ -1000,21 +1006,23 @@ function calcWeeklyMacd_(wCloses, infoLogs) {
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
+// 規則 #11 修正: 狀態判定 (State)
+// 修正 2: 只要 K > D 且 D < 60 即符合
 function calcMonthlyKDLowGolden_(months, infoLogs) {
   if (!months || months.length === 0) return { status: '', available: false, hit: false };
 
-  if (months.length < 12) {
-    infoLogs.push(`m_kd_low_golden skipped: months < 12 (have ${months.length})`);
+  // 因應 LOOKBACK_MONTHS 增加，這裡的防呆也要調整，至少要有足夠數據才能算
+  if (months.length < 15) {
+    infoLogs.push(`m_kd_low_golden skipped: insufficient history (have ${months.length})`);
     return { status: '', available: false, hit: false };
   }
 
   let K = 50;
   let D = 50;
-  let prevK = null;
-  let prevD = null;
 
+  // 標準 KD 算法
   for (let i = 0; i < months.length; i++) {
-    if (i < 8) continue; 
+    if (i < 8) continue; // 前 9 個月 (idx 0-8) 累積數據
     const window = months.slice(Math.max(0, i - 8), i + 1);
     const highs = window.map(m => m.high);
     const lows = window.map(m => m.low);
@@ -1022,24 +1030,22 @@ function calcMonthlyKDLowGolden_(months, infoLogs) {
 
     const highestHigh = Math.max(...highs);
     const lowestLow = Math.min(...lows);
-    if (highestHigh === lowestLow) continue;
-    const RSV = (close - lowestLow) / (highestHigh - lowestLow) * 100;
+    
+    // 防呆：若最高=最低，RSV 設 50
+    let RSV = 50;
+    if (highestHigh !== lowestLow) {
+      RSV = (close - lowestLow) / (highestHigh - lowestLow) * 100;
+    }
+
     K = (2 / 3) * K + (1 / 3) * RSV;
     D = (2 / 3) * D + (1 / 3) * K;
-
-    if (i === months.length - 1) break;
-    prevK = K;
-    prevD = D;
   }
 
-  if (prevK === null || prevD === null) {
-    infoLogs.push('m_kd_low_golden skipped: insufficient RSV history');
-    return { status: '', available: false, hit: false };
-  }
-
-  const golden = (K > D) && (prevK <= prevD);
-  const lowBand = (K < 60) && (D < 60);
-  const hit = golden && lowBand;
+  // 修正邏輯：只要 (K > D) 且 (D < 60)
+  const goldenState = (K > D);
+  const lowBand = (D < 60); // 用戶指定 D < 60 即可
+  
+  const hit = goldenState && lowBand;
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
