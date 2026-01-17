@@ -72,6 +72,17 @@ const SIGNAL_HEADERS_MONTHLY = [
   'exit_note'
 ];
 
+function doGet(e) { // CHANGED: add signals API response routing.
+  const action = e && e.parameter ? String(e.parameter.action || '') : '';
+  if (action === 'getSignalsTW') {
+    const payload = apiGetSignals_TW_(); // CHANGED: serve merged signals payload.
+    return ContentService
+      .createTextOutput(JSON.stringify(payload))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  return HtmlService.createHtmlOutputFromFile('index');
+}
+
 function initSheets_TW() {
   const ss = SpreadsheetApp.getActive();
   const raw = getOrCreateSheet_(ss, SHEET_RAW);
@@ -1074,6 +1085,78 @@ function buildSignalHeaders_(existingHeader) {
   placeAfter('exit_action', 'position_cap3');
   placeAfter('exit_note', 'exit_action');
   return finalHeaders;
+}
+
+function buildConfigMap_TW_() { // CHANGED: build config map by header names.
+  const ss = SpreadsheetApp.getActive();
+  const cfg = getOrCreateSheet_(ss, SHEET_CONFIG);
+  const values = cfg.getDataRange().getValues();
+  if (!values.length) return {};
+
+  const header = values[0].map(h => String(h || '').trim());
+  const idxTicker = header.indexOf('ticker');
+  const idxName = header.indexOf('name');
+  const idxHolding = header.indexOf('holding');
+  if (idxTicker < 0) return {};
+
+  const map = {};
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const key = String(row[idxTicker] || '').trim();
+    if (!key) continue;
+    map[key] = {
+      name: idxName >= 0 ? String(row[idxName] ?? '') : '',
+      holding: idxHolding >= 0 ? String(row[idxHolding] ?? '') : ''
+    };
+  }
+  return map;
+}
+
+function apiGetSignals_TW_() { // CHANGED: merge config data into signals payload.
+  const ss = SpreadsheetApp.getActive();
+  const sig = getOrCreateSheet_(ss, SHEET_SIGNALS);
+  const values = sig.getDataRange().getValues();
+  if (!values.length) return { headers: [], rows: [] };
+
+  const rawHeaders = values[0].map(h => String(h || '').trim());
+  const cleanedHeaders = rawHeaders.filter(h => h && h !== 'bottom_lead_hits2');
+  const configMap = buildConfigMap_TW_();
+  const tickerIdx = rawHeaders.indexOf('ticker');
+
+  const headers = [];
+  let inserted = false;
+  cleanedHeaders.forEach(h => {
+    headers.push(h);
+    if (!inserted && h === 'ticker') {
+      headers.push('name', 'holding');
+      inserted = true;
+    }
+  });
+  if (!inserted) {
+    const marketIdx = headers.indexOf('market');
+    if (marketIdx >= 0) {
+      headers.splice(marketIdx + 1, 0, 'name', 'holding');
+    } else {
+      headers.unshift('name', 'holding');
+    }
+  }
+
+  const rows = values.slice(1).map(row => {
+    const ticker = tickerIdx >= 0 ? String(row[tickerIdx] || '').trim() : '';
+    const cfg = ticker ? (configMap[ticker] || {}) : {};
+    const rowMap = {};
+    rawHeaders.forEach((h, idx) => {
+      if (h) rowMap[h] = row[idx];
+    });
+
+    return headers.map(h => {
+      if (h === 'name') return cfg.name || '';
+      if (h === 'holding') return cfg.holding || '';
+      return Object.prototype.hasOwnProperty.call(rowMap, h) ? rowMap[h] : '';
+    });
+  });
+
+  return { headers, rows };
 }
 
 function buildSignalRow_(header, calc, ticker) {
