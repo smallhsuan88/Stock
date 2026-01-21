@@ -886,13 +886,17 @@ function calcWeeklyMacd_(wCloses, infoLogs) {
   const prevIdx = findPrevFinitePairIndex_(macdLine, signalLine, lastIdx);
   if (prevIdx < 0) return { status: '', available: false, hit: false };
 
-  // Rule #8: Golden Cross + Histogram > 0 + Histogram Growing
-  const isGoldenCross = macdLine[lastIdx] > signalLine[lastIdx] && macdLine[prevIdx] <= signalLine[prevIdx];
-  const currHist = macdLine[lastIdx] - signalLine[lastIdx];
-  const prevHist = macdLine[prevIdx] - signalLine[prevIdx];
-  const isPositive = currHist > 0;
-  const isGrowing = currHist > prevHist;
-  const hit = isGoldenCross && isPositive && isGrowing;
+  // Rule #8 (NEW): State + Momentum
+  // Signal when Weekly DIF > Weekly MACD(DEA) AND (DIF-DEA) is higher than previous week
+  const currDif = macdLine[lastIdx];
+  const currDea = signalLine[lastIdx];
+  const prevDif = macdLine[prevIdx];
+  const prevDea = signalLine[prevIdx];
+
+  const currHist = currDif - currDea;
+  const prevHist = prevDif - prevDea;
+
+  const hit = (currDif > currDea) && (currHist > prevHist);
   return { status: hit ? 'TRUE' : 'FALSE', available: true, hit };
 }
 
