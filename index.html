@@ -125,6 +125,7 @@
 /** ====== CONFIG ====== */
 const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwOnrz61wKQobT-mVwLMnvs_abdLK71rp6ohvgt7WzObh8Dw0zOJTLCGz1G9I6pgm9NaQ/exec";
 const SIGNALS_API_URL = GAS_WEBAPP_URL + "?action=getSignalsTW";
+const HISTORY_DELTA_API_URL = GAS_WEBAPP_URL + "?action=getHistoryDeltaTW";
 const MARKET_CSV_URL =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vR0jZGDcs7RBtAIDCjvT4ficZrXwK_lTZTIkxKQHJo8kt9Rh9f9agTXoOzkn5zBa10xNwsj0YkhNfyg/pub?gid=3585350&single=true&output=csv";
 
@@ -146,6 +147,7 @@ let showTechnicalData = false;
 let marketInfo = null;
 let holdingsMap = new Map();
 const POSITION_CAP_TOTAL = "position_cap_total";
+const DELTA_POSITION_HEADER = "Δposition";
 
 const DECISION_HEADERS = [
   "adx_state",
@@ -162,6 +164,7 @@ const PRIORITY_AFTER_VOLUME = [
   "position_cap",
   "position_cap2",
   "position_cap3",
+  DELTA_POSITION_HEADER,
   "exit_action",
   "exit_note"
 ];
@@ -307,6 +310,14 @@ function formatCapTotal(row, colIndex){
   return total.toFixed(2);
 }
 
+function formatDeltaValue(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  const percent = n * 100;
+  const sign = percent > 0 ? "+" : "";
+  return `${sign}${percent.toFixed(1)}%`;
+}
+
 function getPositionCapTotalValue(row, colIndex){
   const keys = ["position_cap", "position_cap2", "position_cap3"];
   const totals = keys.map((key) => {
@@ -317,6 +328,34 @@ function getPositionCapTotalValue(row, colIndex){
   });
   if (!totals.some(Number.isFinite)) return NaN;
   return totals.reduce((sum, value) => (Number.isFinite(value) ? sum + value : sum), 0);
+}
+
+function ensureDeltaColumn(){
+  if (headers.includes(DELTA_POSITION_HEADER)) return;
+  headers = headers.concat([DELTA_POSITION_HEADER]);
+  baseHeaders = baseHeaders.concat([DELTA_POSITION_HEADER]);
+  rows = rows.map(r => r.concat([""]));
+}
+
+function applyHistoryDelta(byTicker){
+  if (!byTicker) return;
+  ensureDeltaColumn();
+  const deltaMap = new Map();
+  Object.keys(byTicker).forEach((ticker) => {
+    const key = normalizeTickerKey(ticker);
+    const delta = byTicker[ticker] ? Number(byTicker[ticker].delta) : NaN;
+    if (key && Number.isFinite(delta)) deltaMap.set(key, delta);
+  });
+
+  const tickerIdx = headers.indexOf("ticker");
+  const deltaIdx = headers.indexOf(DELTA_POSITION_HEADER);
+  rows = rows.map((row) => {
+    const next = row.slice();
+    const key = tickerIdx >= 0 ? normalizeTickerKey(next[tickerIdx]) : "";
+    const delta = key ? deltaMap.get(key) : undefined;
+    next[deltaIdx] = Number.isFinite(delta) ? delta : "";
+    return next;
+  });
 }
 
 function buildHoldingsMapFromConfig(text){
@@ -700,6 +739,8 @@ function render(){
         displayValue = holdingValue ?? "";
       } else if (h === POSITION_CAP_TOTAL) {
         displayValue = formatCapTotal(r, colIndex);
+      } else if (h === DELTA_POSITION_HEADER) {
+        displayValue = formatDeltaValue(c);
       }
       td.textContent = displayValue ?? "";
 
@@ -830,6 +871,19 @@ function renderMarketGate(){
   baseHeaders = headers.slice();
 
   rows = (signalsPayload.rows || []).map(r => normalizeRowToHeaders(headers, r));
+
+  let historyDeltaPayload = null;
+  try {
+    const historyRes = await fetch(HISTORY_DELTA_API_URL, { cache: "no-store" });
+    historyDeltaPayload = await historyRes.json();
+  } catch (err) {
+    historyDeltaPayload = null;
+  }
+
+  ensureDeltaColumn();
+  if (historyDeltaPayload && historyDeltaPayload.ok) {
+    applyHistoryDelta(historyDeltaPayload.byTicker);
+  }
 
   const configCsvUrl = (typeof signalsPayload.config_csv_url === "string" ? signalsPayload.config_csv_url.trim() : "")
     || (typeof CONFIG_TW_CSV_URL !== "undefined" ? String(CONFIG_TW_CSV_URL || "").trim() : "");
