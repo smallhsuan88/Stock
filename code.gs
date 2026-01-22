@@ -377,6 +377,37 @@ function parsePercent_(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function normalizeTickerTW_(ticker) {
+  const raw = String(ticker ?? '').trim();
+  if (!raw) return '';
+  if (/^\d+$/.test(raw) && raw.length < 4) {
+    return raw.padStart(4, '0');
+  }
+  return raw;
+}
+
+function parsePosition_(value) {
+  if (value === '' || value === null || value === undefined) return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const cleaned = String(value).replace(/,/g, '').trim();
+  if (!cleaned) return 0;
+  if (cleaned.endsWith('%')) {
+    const n = Number(cleaned.slice(0, -1));
+    return Number.isFinite(n) ? n / 100 : 0;
+  }
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function headerIndexMap_(headers) {
+  const map = {};
+  headers.forEach((h, idx) => {
+    const key = String(h || '').trim();
+    if (key) map[key] = idx;
+  });
+  return map;
+}
+
 // --- Utils & Rules ---
 
 function readTickers_(cfgSheet) {
@@ -1226,26 +1257,27 @@ function logSignalsToHistory_TW() {
 
   const values = sig.getDataRange().getValues();
   const headers = values[0].map(h => String(h || '').trim());
-  const idxTicker = headers.indexOf('ticker');
-  const idxDate = headers.indexOf('date');
-  const idxCap2 = headers.indexOf('position_cap2');
-  const idxCap3 = headers.indexOf('position_cap3');
-  const idxMid = headers.indexOf('mid_position_cap');
+  const idx = headerIndexMap_(headers);
+  const idxTicker = idx.ticker ?? -1;
+  const idxDate = idx.date ?? -1;
+  const idxCap2 = idx.position_cap2 ?? -1;
+  const idxCap3 = idx.position_cap3 ?? -1;
+  const idxMid = idx.mid_position_cap ?? -1;
 
   if (idxTicker < 0 || idxDate < 0) return;
 
   const latestByTicker = new Map();
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
-    const ticker = String(row[idxTicker] || '').trim();
+    const ticker = normalizeTickerTW_(row[idxTicker]);
     if (!ticker) continue;
     const date = formatDateISO_(row[idxDate]);
     if (!date) continue;
 
     const position =
-      parsePercent_(idxCap2 >= 0 ? row[idxCap2] : 0) +
-      parsePercent_(idxCap3 >= 0 ? row[idxCap3] : 0) +
-      parsePercent_(idxMid >= 0 ? row[idxMid] : 0);
+      parsePosition_(idxCap2 >= 0 ? row[idxCap2] : 0) +
+      parsePosition_(idxCap3 >= 0 ? row[idxCap3] : 0) +
+      parsePosition_(idxMid >= 0 ? row[idxMid] : 0);
 
     const existing = latestByTicker.get(ticker);
     if (!existing || date > existing.date) {
@@ -1260,17 +1292,23 @@ function logSignalsToHistory_TW() {
   const existingKeys = new Set();
   for (let i = 1; i < historyValues.length; i++) {
     const row = historyValues[i];
-    const t = String(row[0] || '').trim();
+    const t = normalizeTickerTW_(row[0]);
     const d = formatDateISO_(row[2]);
     if (t && d) existingKeys.add(`${t}|${d}`);
   }
 
   const configMap = buildConfigMap_TW_();
+  const normalizedConfigMap = {};
+  Object.keys(configMap).forEach(key => {
+    const normalized = normalizeTickerTW_(key);
+    if (!normalized) return;
+    normalizedConfigMap[normalized] = configMap[key];
+  });
   const toAppend = [];
   for (const [ticker, info] of latestByTicker.entries()) {
     const key = `${ticker}|${info.date}`;
     if (existingKeys.has(key)) continue;
-    const name = configMap[ticker] ? configMap[ticker].name : '';
+    const name = normalizedConfigMap[ticker] ? normalizedConfigMap[ticker].name : '';
     toAppend.push([ticker, name || '', info.date, info.position]);
   }
 
@@ -1312,20 +1350,21 @@ function apiGetHistoryDeltaTW_() {
 
   const values = history.getDataRange().getValues();
   const headers = values[0].map(h => String(h || '').trim());
-  const idxTicker = headers.indexOf('ticker');
-  const idxDate = headers.indexOf('date');
-  const idxPosition = headers.indexOf('position');
+  const idx = headerIndexMap_(headers);
+  const idxTicker = idx.ticker ?? -1;
+  const idxDate = idx.date ?? -1;
+  const idxPosition = idx.position ?? -1;
 
   if (idxTicker < 0 || idxDate < 0 || idxPosition < 0) return {};
 
   const tracker = {};
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
-    const ticker = String(row[idxTicker] || '').trim();
+    const ticker = normalizeTickerTW_(row[idxTicker]);
     if (!ticker) continue;
     const date = formatDateISO_(row[idxDate]);
     if (!date) continue;
-    const position = parsePercent_(row[idxPosition]);
+    const position = parsePosition_(row[idxPosition]);
     const current = { date, rowIndex: i, position };
 
     if (!tracker[ticker]) {
@@ -1396,6 +1435,7 @@ function getOrCreateHistorySheet_(ss) {
   const sheet = getOrCreateSheet_(ss, SHEET_HISTORY);
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(HISTORY_HEADERS);
+    sheet.getRange('A:A').setNumberFormat('@');
     return sheet;
   }
   const headerRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
@@ -1403,6 +1443,7 @@ function getOrCreateHistorySheet_(ss) {
   if (!hasHeader) {
     sheet.getRange(1, 1, 1, HISTORY_HEADERS.length).setValues([HISTORY_HEADERS]);
   }
+  sheet.getRange('A:A').setNumberFormat('@');
   return sheet;
 }
 
