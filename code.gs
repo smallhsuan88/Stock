@@ -31,10 +31,9 @@ const NECKLINE_EPS = 0.005;
 
 const SLEEP_MS_EACH_TICKER = 100; 
 
-const TIME_BUDGET_MS = 330000; 
-const CHUNK_MIN_LEFT_MS = 15000; 
-const PROP_KEY = 'TW_MVP_PROGRESS';
 const PROP_TRIGGER_AT = 'TW_MVP_NEXT_TRIGGER_AT';
+const PROP_NEXT_INDEX = 'TW_MVP_NEXT_INDEX';
+const PROP_NEXT_DATE = 'TW_MVP_NEXT_DATE';
 
 const SIGNAL_HEADERS_BASE = [
   'market','ticker','date','close','volume',
@@ -113,8 +112,11 @@ function initSheets_TW() {
 }
 
 function runTW_MVP() {
+  const START = Date.now();
+  const MAX_MS = 330000;
+  const CHUNK = 50;
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return;
+  if (!lock.tryLock(10000)) return;
 
   const ss = SpreadsheetApp.getActive();
   const props = PropertiesService.getScriptProperties();
@@ -145,22 +147,12 @@ function runTW_MVP() {
 
     // 修正：這裡直接賦值，不再用 const 宣告
     rawDataMap = loadRawDataToMap_(raw);
-    
-    const tickersKey = tickers.join(',');
-    let progress = parseProgress_(props.getProperty(PROP_KEY));
-    const nowMs = Date.now();
-    const runStartMs = nowMs;
-    let runId = progress.runId;
-    let next = progress.next || 0;
-    let startedAt = progress.startedAt || nowMs;
-
-    if (!runId || progress.tickersKey !== tickersKey || next >= tickers.length) {
-      runId = Utilities.getUuid();
-      next = 0;
-      startedAt = nowMs;
-    }
-
-    props.setProperty(PROP_KEY, JSON.stringify({ next, runId, startedAt, tickersKey }));
+    const today = formatDateISO_(new Date());
+    const storedDate = props.getProperty(PROP_NEXT_DATE);
+    let startIndex = Number(props.getProperty(PROP_NEXT_INDEX) || 0);
+    if (!storedDate || storedDate !== today) startIndex = 0;
+    if (!Number.isFinite(startIndex) || startIndex < 0) startIndex = 0;
+    if (startIndex >= tickers.length) startIndex = 0;
 
     const rawValues = raw.getLastRow() > 0 ? raw.getDataRange().getValues() : [];
     rawHeader = rawValues.length ? rawValues[0] : ['ticker','date','open','high','low','close','volume'];
@@ -170,7 +162,7 @@ function runTW_MVP() {
       : [];
     sigHeader = buildSignalHeaders_(existingSigHeader);
 
-    if (next === 0) {
+    if (startIndex === 0) {
       if (typeof toWeeklyBars_ !== 'function' || typeof toMonthlyBars_ !== 'function') {
         log_(logBuffer, 'ERROR', '', 'Missing toWeeklyBars_ / toMonthlyBars_. Aborting before clearing Signals_TW.');
         flushLogs_(logSheet, logBuffer);
@@ -182,55 +174,63 @@ function runTW_MVP() {
       sig.getRange(1, 1, 1, sigHeader.length).setValues([sigHeader]);
     }
 
-    log_(logBuffer, 'INFO', '', `Run started. RunID=${runId} Tickers=${tickers.length}, StartIdx=${next}`);
+    log_(logBuffer, 'INFO', '', `Run started. Tickers=${tickers.length}, StartIdx=${startIndex}`);
 
-    for (let i = next; i < tickers.length; i++) {
-      const ticker = tickers[i];
-      try {
-        const existingRows = rawDataMap.get(ticker) || [];
-        const { rows: mergedRows, fetchedCount } = fetchSmartTWSEData_(ticker, existingRows, LOOKBACK_MONTHS);
-        
-        if (!mergedRows.length) {
-          log_(logBuffer, 'WARN', ticker, 'No data (ETF/OTC/API Empty)');
-        } else {
-          processedRawData.set(ticker, mergedRows);
-          const calc = calcSignalsFromRows_(mergedRows);
-          signalsRows.push(buildSignalRow_(sigHeader, calc, ticker));
+    let batchStartIndex = startIndex;
+    while (batchStartIndex < tickers.length) {
+      const endIndex = Math.min(batchStartIndex + CHUNK, tickers.length);
+      const batchTickers = tickers.slice(batchStartIndex, endIndex);
 
-          log_(logBuffer, 'INFO', ticker,
-            `OK ${calc.date} (Fetched ${fetchedCount}m) ` +
-            `MA60=${num_(calc.ma60,1)} Breakout=${calc.breakout}`
-          );
-          if (calc.infoLogs && calc.infoLogs.length) {
-            calc.infoLogs.forEach(msg => log_(logBuffer, 'INFO', ticker, msg));
+      log_(logBuffer, 'INFO', '', `Processing batch ${batchStartIndex}-${endIndex - 1}`);
+      const batchData = fetchSmartTWSEDataBatch_(batchTickers, rawDataMap, LOOKBACK_MONTHS);
+
+      for (let i = 0; i < batchTickers.length; i++) {
+        const ticker = batchTickers[i];
+        try {
+          const batchResult = batchData.get(ticker);
+          const mergedRows = batchResult ? batchResult.rows : [];
+          const fetchedCount = batchResult ? batchResult.fetchedCount : 0;
+          
+          if (!mergedRows.length) {
+            log_(logBuffer, 'WARN', ticker, 'No data (ETF/OTC/API Empty)');
+          } else {
+            processedRawData.set(ticker, mergedRows);
+            const calc = calcSignalsFromRows_(mergedRows);
+            signalsRows.push(buildSignalRow_(sigHeader, calc, ticker));
+
+            log_(logBuffer, 'INFO', ticker,
+              `OK ${calc.date} (Fetched ${fetchedCount}m) ` +
+              `MA60=${num_(calc.ma60,1)} Breakout=${calc.breakout}`
+            );
+            if (calc.infoLogs && calc.infoLogs.length) {
+              calc.infoLogs.forEach(msg => log_(logBuffer, 'INFO', ticker, msg));
+            }
           }
+        } catch (e) {
+          log_(logBuffer, 'ERROR', ticker, String(e && e.stack ? e.stack : e));
+        } finally {
+          Utilities.sleep(SLEEP_MS_EACH_TICKER);
         }
-      } catch (e) {
-        log_(logBuffer, 'ERROR', ticker, String(e && e.stack ? e.stack : e));
-      } finally {
-        Utilities.sleep(SLEEP_MS_EACH_TICKER);
       }
 
-      if (Date.now() - runStartMs > TIME_BUDGET_MS - CHUNK_MIN_LEFT_MS) {
-        props.setProperty(PROP_KEY, JSON.stringify({
-          next: i + 1,
-          runId,
-          startedAt,
-          tickersKey
-        }));
+      if (endIndex < tickers.length && (Date.now() - START) > MAX_MS) {
+        props.setProperty(PROP_NEXT_INDEX, String(endIndex));
+        props.setProperty(PROP_NEXT_DATE, today);
         scheduleNextRun_(props);
-        log_(logBuffer, 'INFO', '', `Paused & scheduled next run. next=${i + 1}`);
+        log_(logBuffer, 'INFO', '', `Paused & scheduled next run. next=${endIndex}`);
         flushLogs_(logSheet, logBuffer);
         flushSignals_(sig, signalsRows, sigHeader);
-        // 這裡 rawDataMap 是可見的
         flushSmartRaw_(raw, rawHeader, rawDataMap, processedRawData);
         return;
       }
+
+      batchStartIndex = endIndex;
     }
 
-    const secs = Math.round((Date.now() - runStartMs) / 1000);
+    const secs = Math.round((Date.now() - START) / 1000);
     log_(logBuffer, 'INFO', '', `Run finished. Total seconds=${secs}`);
-    props.deleteProperty(PROP_KEY);
+    props.deleteProperty(PROP_NEXT_INDEX);
+    props.deleteProperty(PROP_NEXT_DATE);
     props.deleteProperty(PROP_TRIGGER_AT);
 
   } catch (e) {
@@ -268,6 +268,102 @@ function loadRawDataToMap_(sheet) {
     rows.sort((a,b) => a.date.localeCompare(b.date));
   }
   return map;
+}
+
+function fetchSmartTWSEDataBatch_(tickers, rawDataMap, lookbackMonths) {
+  const now = new Date();
+  const neededStart = new Date(now.getFullYear(), now.getMonth() - lookbackMonths, 1);
+  const neededStartStr = Utilities.formatDate(neededStart, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const end = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const plans = [];
+  const requests = [];
+  const requestPlans = [];
+  tickers.forEach(ticker => {
+    const existingRows = rawDataMap.get(ticker) || [];
+    let fetchStartDate = neededStart;
+    if (existingRows.length > 0) {
+      const lastRow = existingRows[existingRows.length - 1];
+      const lastDate = new Date(lastRow.date);
+      fetchStartDate = new Date(lastDate.getFullYear(), lastDate.getMonth(), 1);
+      if (fetchStartDate < neededStart) fetchStartDate = neededStart;
+    }
+
+    const monthsToFetch = [];
+    let curr = new Date(fetchStartDate);
+    while (curr <= end) {
+      monthsToFetch.push({
+        y: curr.getFullYear(),
+        m: String(curr.getMonth() + 1).padStart(2, '0')
+      });
+      curr = new Date(curr.getFullYear(), curr.getMonth() + 1, 1);
+    }
+
+    const plan = {
+      ticker,
+      existingRows,
+      monthsToFetch,
+      neededStartStr,
+      newFetchedRows: []
+    };
+    monthsToFetch.forEach(ym => {
+      const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${ym.y}${ym.m}01&stockNo=${ticker}`;
+      requests.push({ url, muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      requestPlans.push(plan);
+    });
+    plans.push(plan);
+  });
+
+  if (requests.length) {
+    const responses = UrlFetchApp.fetchAll(requests);
+    responses.forEach((resp, idx) => {
+      const plan = requestPlans[idx];
+      if (!plan) return;
+      if (!resp || resp.getResponseCode() !== 200) return;
+      let json = null;
+      try {
+        json = JSON.parse(resp.getContentText());
+      } catch (e) {
+        return;
+      }
+      if (!json || !json.data) return;
+      if (json.stat && json.stat !== 'OK') return;
+      json.data.forEach(arr => {
+        const dateISO = rocToISO_(arr[0]);
+        if (!dateISO) return;
+        const volume = safeVolume_(arr);
+        const close = parseNum_(arr[6]);
+        if (isFinite(close) && close > 0) {
+          plan.newFetchedRows.push({
+            date: dateISO,
+            open: parseNum_(arr[3]),
+            high: parseNum_(arr[4]),
+            low: parseNum_(arr[5]),
+            close: close,
+            volume: volume
+          });
+        }
+      });
+    });
+  }
+
+  const results = new Map();
+  plans.forEach(plan => {
+    plan.newFetchedRows.sort((a, b) => a.date.localeCompare(b.date));
+    const minNewDate = plan.newFetchedRows.length > 0 ? plan.newFetchedRows[0].date : '9999-99-99';
+    const keepOld = plan.existingRows.filter(r => r.date >= plan.neededStartStr && r.date < minNewDate);
+    const combined = keepOld.concat(plan.newFetchedRows);
+    combined.sort((a, b) => a.date.localeCompare(b.date));
+    const dedup = [];
+    const seen = new Set();
+    for (const r of combined) {
+      if (seen.has(r.date)) continue;
+      seen.add(r.date);
+      dedup.push(r);
+    }
+    results.set(plan.ticker, { rows: dedup, fetchedCount: plan.monthsToFetch.length });
+  });
+  return results;
 }
 
 function fetchSmartTWSEData_(ticker, existingRows, lookbackMonths) {
@@ -428,7 +524,7 @@ function fetchTWSEMonthData_(ticker, year, mm) {
   const backoffMs = [300, 800];
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const resp = UrlFetchApp.fetchAll([{ url, muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } }])[0];
       if (resp.getResponseCode() !== 200) throw new Error(`HTTP ${resp.getResponseCode()}`);
       const json = JSON.parse(resp.getContentText());
       if (!json || !json.data) return [];
