@@ -182,7 +182,12 @@ function runTW_MVP() {
       const batchTickers = tickers.slice(batchStartIndex, endIndex);
 
       log_(logBuffer, 'INFO', '', `Processing batch ${batchStartIndex}-${endIndex - 1}`);
-      const batchData = fetchSmartTWSEDataBatch_(batchTickers, rawDataMap, LOOKBACK_MONTHS);
+      const batchData = fetchSmartTWSEDataBatch_(
+        batchTickers,
+        rawDataMap,
+        LOOKBACK_MONTHS,
+        { batchSize: 25, sleepBetweenBatchMs: 700 }
+      );
 
       for (let i = 0; i < batchTickers.length; i++) {
         const ticker = batchTickers[i];
@@ -270,7 +275,11 @@ function loadRawDataToMap_(sheet) {
   return map;
 }
 
-function fetchSmartTWSEDataBatch_(tickers, rawDataMap, lookbackMonths) {
+function fetchSmartTWSEDataBatch_(tickers, rawDataMap, lookbackMonths, options) {
+  const BATCH_SIZE = options && options.batchSize ? options.batchSize : 25;
+  const SLEEP_BETWEEN_BATCH_MS = options && options.sleepBetweenBatchMs ? options.sleepBetweenBatchMs : 700;
+  const MAX_RETRY = 5;
+  const BACKOFF_BASE_MS = 1000;
   const now = new Date();
   const neededStart = new Date(now.getFullYear(), now.getMonth() - lookbackMonths, 1);
   const neededStartStr = Utilities.formatDate(neededStart, Session.getScriptTimeZone(), 'yyyy-MM-dd');
@@ -315,36 +324,65 @@ function fetchSmartTWSEDataBatch_(tickers, rawDataMap, lookbackMonths) {
   });
 
   if (requests.length) {
-    const responses = UrlFetchApp.fetchAll(requests);
-    responses.forEach((resp, idx) => {
-      const plan = requestPlans[idx];
-      if (!plan) return;
-      if (!resp || resp.getResponseCode() !== 200) return;
-      let json = null;
-      try {
-        json = JSON.parse(resp.getContentText());
-      } catch (e) {
-        return;
-      }
-      if (!json || !json.data) return;
-      if (json.stat && json.stat !== 'OK') return;
-      json.data.forEach(arr => {
-        const dateISO = rocToISO_(arr[0]);
-        if (!dateISO) return;
-        const volume = safeVolume_(arr);
-        const close = parseNum_(arr[6]);
-        if (isFinite(close) && close > 0) {
-          plan.newFetchedRows.push({
-            date: dateISO,
-            open: parseNum_(arr[3]),
-            high: parseNum_(arr[4]),
-            low: parseNum_(arr[5]),
-            close: close,
-            volume: volume
+    for (let start = 0; start < requests.length; start += BATCH_SIZE) {
+      const batchIndex = Math.floor(start / BATCH_SIZE);
+      const batchRequests = requests.slice(start, start + BATCH_SIZE);
+      const batchPlans = requestPlans.slice(start, start + BATCH_SIZE);
+      let attempt = 0;
+      while (true) {
+        try {
+          const responses = UrlFetchApp.fetchAll(batchRequests);
+          const retryCode = responses.find(resp => resp && (resp.getResponseCode() === 429 || resp.getResponseCode() === 503));
+          if (retryCode) {
+            throw new Error(`HTTP ${retryCode.getResponseCode()} throttling`);
+          }
+          responses.forEach((resp, idx) => {
+            const plan = batchPlans[idx];
+            if (!plan) return;
+            if (!resp || resp.getResponseCode() !== 200) return;
+            let json = null;
+            try {
+              json = JSON.parse(resp.getContentText());
+            } catch (e) {
+              return;
+            }
+            if (!json || !json.data) return;
+            if (json.stat && json.stat !== 'OK') return;
+            json.data.forEach(arr => {
+              const dateISO = rocToISO_(arr[0]);
+              if (!dateISO) return;
+              const volume = safeVolume_(arr);
+              const close = parseNum_(arr[6]);
+              if (isFinite(close) && close > 0) {
+                plan.newFetchedRows.push({
+                  date: dateISO,
+                  open: parseNum_(arr[3]),
+                  high: parseNum_(arr[4]),
+                  low: parseNum_(arr[5]),
+                  close: close,
+                  volume: volume
+                });
+              }
+            });
           });
+          break;
+        } catch (e) {
+          const message = String(e && e.message ? e.message : e);
+          const isThrottle = message.indexOf('Service invoked too many times') !== -1 ||
+            message.indexOf('Exception: Service invoked too many times') !== -1 ||
+            message.indexOf('HTTP 429') !== -1 ||
+            message.indexOf('HTTP 503') !== -1;
+          if (!isThrottle || attempt >= MAX_RETRY) {
+            Logger.log(`fetchSmartTWSEDataBatch_ batch=${batchIndex} attempt=${attempt} error=${message}`);
+            throw e;
+          }
+          const sleepMs = BACKOFF_BASE_MS * (2 ** attempt) + Math.floor(Math.random() * 301);
+          Utilities.sleep(sleepMs);
+          attempt += 1;
         }
-      });
-    });
+      }
+      Utilities.sleep(SLEEP_BETWEEN_BATCH_MS);
+    }
   }
 
   const results = new Map();
